@@ -1,0 +1,240 @@
+diff --git a/src/archo.cpp b/src/archo.cpp
+--- a/src/archo.cpp
++++ b/src/archo.cpp
+@@ -339,8 +339,17 @@
+ 
+ 	string strEmptyEntitlements = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\">\n<dict/>\n</plist>\n";
+ 	ZSign::SlotBuildRequirements(strBundleId, pSignAsset->m_strSubjectCN, strRequirementsSlot);
+-	ZSign::SlotBuildEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : strEmptyEntitlements, strEntitlementsSlot);
+-	ZSign::SlotBuildDerEntitlements(IsExecute() ? pSignAsset->m_strEntitleData : "", strDerEntitlementsSlot);
++	string strBundleEntitlements = pSignAsset->m_strEntitleData;
++	// The file-only pass uses a filename identifier and zero-filled resource
++	// digests. Resolve identifiers only during the final bundle sealing pass.
++	bool bBundlePass = string::npos != strCodeResourcesSHA256.find_first_not_of('\0');
++	if (IsExecute() && bBundlePass && !pSignAsset->m_bAdhoc && !pSignAsset->m_bSingleBinary) {
++		if (!pSignAsset->BuildBundleEntitlements(strBundleId, strBundleEntitlements)) {
++			return false;
++		}
++	}
++	ZSign::SlotBuildEntitlements(IsExecute() ? strBundleEntitlements : strEmptyEntitlements, strEntitlementsSlot);
++	ZSign::SlotBuildDerEntitlements(IsExecute() ? strBundleEntitlements : "", strDerEntitlementsSlot);
+ 
+ 	string strRequirementsSlotSHA1;
+ 	string strRequirementsSlotSHA256;
+diff --git a/src/bundle.cpp b/src/bundle.cpp
+--- a/src/bundle.cpp
++++ b/src/bundle.cpp
+@@ -407,21 +407,31 @@
+ 	// generated: the seal hashes every file in the bundle, so a profile
+ 	// written after sealing leaves the bundle failing Apple's verifier with
+ 	// "a sealed resource is missing or invalid" (codesign --verify --strict).
+-	if (m_pSignAssets) {
+-		auto endsWith = [](const string& str, const string& suffix) {
+-			return str.size() >= suffix.size() && 0 == str.compare(str.size()-suffix.size(), suffix.size(), suffix);
+-		};
+-		for (auto it = m_pSignAssets->rbegin(); it != m_pSignAssets->rend(); ++it) {
+-			m_pSignAsset = &(*it);
+-			if (endsWith(m_pSignAsset->m_strApplicationId, strBundleId)) {
+-				if (!ZFile::WriteFileV(m_pSignAsset->m_strProvData, "%s/%s/embedded.mobileprovision", m_strAppFolder.c_str(), strFolder.c_str())) {
+-					ZLog::ErrorV(">>> Can't write embedded.mobileprovision!\n");
+-					return false;
++	bool bProvisionedBundle = "/" == strFolder || ZFile::IsPathSuffix(strFolder, ".app") || ZFile::IsPathSuffix(strFolder, ".appex");
++	if (bProvisionedBundle && !m_pSignAsset->m_bAdhoc && !m_bRemoveProvision) {
++		if (m_pSignAssets) {
++			ZSignAsset* pMatchedAsset = NULL;
++			for (auto it = m_pSignAssets->rbegin(); it != m_pSignAssets->rend(); ++it) {
++				if (it->AllowsBundleId(strBundleId)) {
++					pMatchedAsset = &(*it);
++					break;
+ 				}
+-				bForceSign = true;
+-				break;
+-			}
+-		}
++			}
++			if (NULL == pMatchedAsset) {
++				ZLog::ErrorV(">>> No profile permits bundle identifier: %s\n", strBundleId.c_str());
++				return false;
++			}
++			m_pSignAsset = pMatchedAsset;
++		}
++		if (!m_pSignAsset->AllowsBundleId(strBundleId) || m_pSignAsset->m_strProvData.empty()) {
++			ZLog::ErrorV(">>> Provisioning profile does not permit bundle identifier: %s\n", strBundleId.c_str());
++			return false;
++		}
++		if (!ZFile::WriteFileV(m_pSignAsset->m_strProvData, "%s/embedded.mobileprovision", strBaseFolder.c_str())) {
++			ZLog::ErrorV(">>> Can't write embedded.mobileprovision!\n");
++			return false;
++		}
++		bForceSign = true;
+ 	}
+ 
+ 	ZFile::CreateFolderV("%s/_CodeSignature", strBaseFolder.c_str());
+diff --git a/src/openssl.cpp b/src/openssl.cpp
+--- a/src/openssl.cpp
++++ b/src/openssl.cpp
+@@ -825,6 +825,66 @@
+ 	m_bSHA256Only = false;
+ }
+ 
++static bool TrollDockIdentifierAllows(const string& strPattern, const string& strIdentifier)
++{
++	size_t star = strPattern.find('*');
++	if (string::npos == star) {
++		return strPattern == strIdentifier;
++	}
++	return star == strPattern.size() - 1 &&
++		0 == strIdentifier.compare(0, star, strPattern, 0, star);
++}
++
++bool ZSignAsset::AllowsBundleId(const string& strBundleId) const
++{
++	size_t dot = m_strApplicationId.find('.');
++	if (strBundleId.empty() || string::npos == dot || 0 == dot) {
++		return false;
++	}
++	string strIdentifier = m_strApplicationId.substr(0, dot + 1) + strBundleId;
++	return TrollDockIdentifierAllows(m_strApplicationId, strIdentifier);
++}
++
++bool ZSignAsset::BuildBundleEntitlements(const string& strBundleId, string& strOutput) const
++{
++	if (!AllowsBundleId(strBundleId)) {
++		ZLog::ErrorV(">>> Provisioning profile does not permit bundle identifier: %s\n", strBundleId.c_str());
++		return false;
++	}
++	jvalue jvEntitlements;
++	if (!jvEntitlements.read_plist(m_strEntitleData) || !jvEntitlements.is_object()) {
++		ZLog::Error(">>> Invalid entitlements property list!\n");
++		return false;
++	}
++	// Do not mutate the shared signing asset. Every nested executable gets its
++	// own XML and DER entitlement blobs from the same resolved dictionary.
++	string strIdentifier = m_strApplicationId.substr(0, m_strApplicationId.find('.') + 1) + strBundleId;
++	jvEntitlements["application-identifier"] = strIdentifier;
++	if (jvEntitlements.has("keychain-access-groups")) {
++		jvalue& groups = jvEntitlements["keychain-access-groups"];
++		if (!groups.is_array()) {
++			ZLog::Error(">>> Invalid keychain access groups!\n");
++			return false;
++		}
++		for (size_t i = 0; i < groups.size(); ++i) {
++			if (!groups[i].is_string()) {
++				ZLog::Error(">>> Invalid keychain access group!\n");
++				return false;
++			}
++			string strGroup = groups[i].as_string();
++			if (string::npos != strGroup.find('*')) {
++				if (!TrollDockIdentifierAllows(strGroup, strIdentifier)) {
++					ZLog::ErrorV(">>> Keychain wildcard does not permit bundle identifier: %s\n", strBundleId.c_str());
++					return false;
++				}
++				groups[i] = strIdentifier;
++			}
++		}
++	}
++	jvEntitlements.style_write_plist(strOutput);
++	return true;
++}
++
+ bool ZSignAsset::Init(
+ 	const string& strCertFile,
+ 	const string& strPKeyFile, 
+diff --git a/src/openssl.h b/src/openssl.h
+--- a/src/openssl.h
++++ b/src/openssl.h
+@@ -21,6 +21,11 @@
+ 						const string& strCodeDirectorySlotSHA1, 
+ 						const string& strAltnateCodeDirectorySlot256, 
+ 						string& strCMSOutput);
++
++	// TrollDock patch: provisioning identifiers must be resolved for each bundle,
++	// including app extensions. The App ID prefix can differ from the Team ID.
++	bool AllowsBundleId(const string& strBundleId) const;
++	bool BuildBundleEntitlements(const string& strBundleId, string& strOutput) const;
+ 
+ private:
+ 	bool GenerateCMS(void* pscert, 
+diff --git a/src/common/fs.cpp b/src/common/fs.cpp
+--- a/src/common/fs.cpp
++++ b/src/common/fs.cpp
+@@ -5,6 +5,30 @@
+ #endif
+ 
+ map<void*, void*> ZFile::s_mapFiles;
++
++#ifdef _WIN32
++// Shell directory creation is limited to MAX_PATH even in a long-path-aware
++// process. Win32 wide APIs support the UTF-8 job path and long bundle names.
++static bool TrollDockCreateDirectories(const wstring& path)
++{
++	DWORD attributes = ::GetFileAttributesW(path.c_str());
++	if (INVALID_FILE_ATTRIBUTES != attributes) {
++		return 0 != (attributes & FILE_ATTRIBUTE_DIRECTORY);
++	}
++	size_t separator = path.find_last_of(L"\\/");
++	if (wstring::npos == separator || separator == 0) {
++		return false;
++	}
++	if (!TrollDockCreateDirectories(path.substr(0, separator))) {
++		return false;
++	}
++	if (::CreateDirectoryW(path.c_str(), NULL)) {
++		return true;
++	}
++	attributes = ::GetFileAttributesW(path.c_str());
++	return INVALID_FILE_ATTRIBUTES != attributes && 0 != (attributes & FILE_ATTRIBUTE_DIRECTORY);
++}
++#endif
+ 
+ bool ZFile::IsRegularFile(const char* path)
+ {
+@@ -208,10 +232,19 @@
+ 	string strPath = GetFullPath(szFolder);
+ 	if (!IsFolder(strPath.c_str())) {
+ #ifdef _WIN32
+-		int32_t nRet = ::SHCreateDirectoryExA(NULL, strPath.c_str(), NULL);
+-		if (ERROR_SUCCESS != nRet && ERROR_ALREADY_EXISTS != nRet) {
++		int length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, strPath.c_str(), -1, NULL, 0);
++		if (length <= 1) {
+ 			return false;
+ 		}
++		vector<wchar_t> buffer(length);
++		if (0 == ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, strPath.c_str(), -1, buffer.data(), length)) {
++			return false;
++		}
++		wstring path(buffer.data());
++		if (0 != path.compare(0, 4, L"\\\\?\\")) {
++			path = (0 == path.compare(0, 2, L"\\\\")) ? L"\\\\?\\UNC\\" + path.substr(2) : L"\\\\?\\" + path;
++		}
++		return TrollDockCreateDirectories(path);
+ #else
+ 		size_t pos = 0;
+ 		pos = strPath.find('/', pos);
+diff --git a/build/windows/vs2022/zsign/zsign.vcxproj b/build/windows/vs2022/zsign/zsign.vcxproj
+--- a/build/windows/vs2022/zsign/zsign.vcxproj
++++ b/build/windows/vs2022/zsign/zsign.vcxproj
+@@ -230,6 +230,9 @@
+     <ClInclude Include="src\iconv.h" />
+   </ItemGroup>
+   <ItemGroup>
++    <Manifest Include="src\trolldock.manifest" />
++  </ItemGroup>
++  <ItemGroup>
+     <ResourceCompile Include="src\zsign.rc">
+       <PreprocessorDefinitions>$(ExtraDefines);$(ExtraResourceDefines);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ResourceCompile>
+diff --git a/build/windows/vs2022/zsign/src/trolldock.manifest b/build/windows/vs2022/zsign/src/trolldock.manifest
+new file mode 100644
+--- /dev/null
++++ b/build/windows/vs2022/zsign/src/trolldock.manifest
+@@ -0,0 +1,9 @@
++<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
++<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
++  <application xmlns="urn:schemas-microsoft-com:asm.v3">
++    <windowsSettings>
++      <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
++      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
++    </windowsSettings>
++  </application>
++</assembly>

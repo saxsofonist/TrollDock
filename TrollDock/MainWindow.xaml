@@ -1,0 +1,499 @@
+<Window x:Class="TrollDock.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="TrollDock — IPA и DEB по USB" Width="900" Height="790"
+        MinWidth="780" MinHeight="600" WindowStartupLocation="CenterScreen"
+        Background="#F3F5F9" Foreground="#16243A" FontFamily="Segoe UI" FontSize="13"
+        UseLayoutRounding="True" SnapsToDevicePixels="True">
+    <Window.Resources>
+        <SolidColorBrush x:Key="AccentBrush" Color="#2165E8" />
+        <SolidColorBrush x:Key="MutedBrush" Color="#67768D" />
+        <Style TargetType="TextBlock">
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="Caption" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{StaticResource MutedBrush}" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Margin" Value="0,0,0,6" />
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="16,10" />
+            <Setter Property="Background" Value="#FFFFFF" />
+            <Setter Property="BorderBrush" Value="#DCE3ED" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Foreground" Value="#263B58" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="ButtonBorder" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="9" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" RecognizesAccessKey="True" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.82" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.65" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.4" />
+                                <Setter Property="Cursor" Value="Arrow" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#2165E8" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="White" />
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#FAFBFD" />
+            <Setter Property="BorderBrush" Value="#DCE3ED" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="36" />
+            <Setter Property="SelectionBrush" Value="#A4C6FF" />
+        </Style>
+        <Style TargetType="PasswordBox">
+            <Setter Property="Background" Value="#FAFBFD" />
+            <Setter Property="BorderBrush" Value="#DCE3ED" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="10,8" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="MinHeight" Value="36" />
+        </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="MinHeight" Value="38" />
+            <Setter Property="Padding" Value="10,7" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="BorderBrush" Value="#DCE3ED" />
+            <Setter Property="Background" Value="#FAFBFD" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Focusable="False" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" ClickMode="Press">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="#FAFBFD" BorderBrush="#DCE3ED" BorderThickness="1" CornerRadius="8">
+                                            <Path Data="M 0,0 L 4,4 L 8,0" Stroke="#67768D" StrokeThickness="1.5" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,13,0" />
+                                        </Border>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                              IsHitTestVisible="False" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="11,3,32,3" />
+                            <Popup x:Name="PART_Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">
+                                <Border MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}" Background="White" BorderBrush="#DCE3ED" BorderThickness="1" CornerRadius="8" Padding="4" Margin="0,4,0,0">
+                                    <ScrollViewer CanContentScroll="True">
+                                        <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="#465B76" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style TargetType="RadioButton">
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="#465B76" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+        <Style x:Key="ModeTab" TargetType="RadioButton" BasedOn="{StaticResource {x:Type RadioButton}}">
+            <Setter Property="Foreground" Value="#67768D" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Padding" Value="20,9" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="TabBorder" Background="Transparent" CornerRadius="8" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter VerticalAlignment="Center" HorizontalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="TabBorder" Property="Background" Value="White" />
+                                <Setter Property="Foreground" Value="#2165E8" />
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="TabBorder" Property="BorderBrush" Value="#2165E8" />
+                                <Setter TargetName="TabBorder" Property="BorderThickness" Value="1" />
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter TargetName="TabBorder" Property="Opacity" Value="0.45" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Background="#F3F5F9">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Background="White" BorderBrush="#E5EAF2" BorderThickness="0,0,0,1" Padding="28,19">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Border Width="42" Height="42" CornerRadius="12" Background="#E9F0FF" Margin="0,0,13,0">
+                    <Viewbox Width="24" Height="24">
+                        <Canvas Width="24" Height="24">
+                            <Path Stroke="#2165E8" StrokeThickness="1.9" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Data="M 7,2 L 17,2 Q 19,2 19,4 L 19,20 Q 19,22 17,22 L 7,22 Q 5,22 5,20 L 5,4 Q 5,2 7,2 M 10,5 L 14,5 M 10,19 L 14,19 M 12,8 L 12,15 M 9,12 L 12,15 L 15,12" />
+                        </Canvas>
+                    </Viewbox>
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <TextBlock Text="TrollDock" FontSize="24" FontWeight="SemiBold" Foreground="#15253E" />
+                    <TextBlock Text="IPA и DEB на iPhone по кабелю" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,2,0,0" />
+                </StackPanel>
+                <Button Grid.Column="2" x:Name="HeaderSettingsButton" Content="Настройки" Click="Settings_Click" Padding="12,8" FontSize="12" Margin="0,0,12,0" VerticalAlignment="Center" />
+                <Border Grid.Column="3" Background="#F3F6FB" CornerRadius="20" Padding="13,8" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse x:Name="ConnectionDot" Width="7" Height="7" Fill="#9AA7BA" Margin="0,0,7,0" VerticalAlignment="Center" />
+                        <TextBlock x:Name="ConnectionStatusText" Text="Нет подключения" FontSize="12" Foreground="#52647E" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="28,22,28,18">
+            <StackPanel>
+                <Grid Margin="0,0,0,12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Text="Выберите файл — остальное сделаем сами" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0" />
+                    <TextBlock Grid.Column="1" x:Name="ConnectionMethodText" FontSize="11" FontWeight="SemiBold" Foreground="#6F819B">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Text" Value="USB + OpenSSH" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsChecked, ElementName=CertificateModeRadioButton}" Value="True">
+                                        <Setter Property="Text" Value="USB + сертификат" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+
+                <StackPanel Margin="0,0,0,14">
+                    <Border Background="#E8EDF5" CornerRadius="11" Padding="3" HorizontalAlignment="Left">
+                        <StackPanel x:Name="ModeTabsPanel" Orientation="Horizontal">
+                            <RadioButton x:Name="IpaModeRadioButton" GroupName="PackageMode" Content="IPA · TrollStore" IsChecked="True" Checked="Mode_Changed" Style="{StaticResource ModeTab}" />
+                            <RadioButton x:Name="DebModeRadioButton" GroupName="PackageMode" Content="DEB · Dopamine" Checked="Mode_Changed" Style="{StaticResource ModeTab}" />
+                            <RadioButton x:Name="CertificateModeRadioButton" GroupName="PackageMode" Content="IPA · Сертификат" Checked="Mode_Changed" Style="{StaticResource ModeTab}" />
+                        </StackPanel>
+                    </Border>
+                    <Button x:Name="RespringButton" Content="Перезапустить интерфейс" Click="Respring_Click" IsEnabled="False" FontSize="11" Padding="11,8" HorizontalAlignment="Right" Margin="0,10,0,0"
+                            ToolTip="Выполнить respring после установки твика. Соединение может прерваться.">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsChecked, ElementName=DebModeRadioButton}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                </StackPanel>
+
+                <Border x:Name="IpaDropZone" Background="#F7FAFF" BorderBrush="#ADC6F2" BorderThickness="1"
+                        CornerRadius="14" Padding="20" Margin="0,0,0,16" AllowDrop="True" Drop="Ipa_Drop" DragOver="Ipa_DragOver">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Border Width="48" Height="58" CornerRadius="8" Background="White" BorderBrush="#DDE8FA" BorderThickness="1" Margin="0,0,16,0">
+                            <StackPanel VerticalAlignment="Center">
+                                <TextBlock Text="↓" FontSize="23" HorizontalAlignment="Center" Foreground="#2165E8" LineHeight="24" />
+                                <TextBlock x:Name="FileTypeText" Text="IPA" FontSize="10" FontWeight="Bold" HorizontalAlignment="Center" Foreground="#2165E8" />
+                            </StackPanel>
+                        </Border>
+                        <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,16,0">
+                            <TextBlock x:Name="IpaNameText" Text="Перетащите сюда файл .ipa" FontWeight="SemiBold" FontSize="15" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="IpaPathText" Text="Или выберите его на компьютере" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,5,0,0" TextTrimming="CharacterEllipsis" />
+                            <TextBlock x:Name="IpaSizeText" Text="" Foreground="#2165E8" FontSize="11" Margin="0,4,0,0" />
+                        </StackPanel>
+                        <Button Grid.Column="2" x:Name="ChooseIpaButton" Content="Выбрать IPA" Click="ChooseIpa_Click" VerticalAlignment="Center" Padding="18,10" AutomationProperties.Name="Выбрать файл IPA" />
+                    </Grid>
+                </Border>
+
+                <Border x:Name="CertificateCard" Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17" Margin="0,0,0,16">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsChecked, ElementName=CertificateModeRadioButton}" Value="True">
+                                    <Setter Property="Visibility" Value="Visible" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <StackPanel>
+                        <Grid Margin="0,0,0,13">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Сертификат для подписи" FontWeight="SemiBold" FontSize="15" />
+                            <TextBlock Grid.Column="1" Text="Подпись на вашем ПК" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                        </Grid>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Сохранённые сертификаты" Style="{StaticResource Caption}" />
+                                <ComboBox x:Name="SavedCertificateComboBox" DisplayMemberPath="Name" SelectionChanged="SavedCertificate_SelectionChanged"
+                                          AutomationProperties.Name="Сохранённый сертификат" ToolTip="Выберите сохранённый сертификат или укажите файлы ниже" />
+                            </StackPanel>
+                            <Button Grid.Column="1" x:Name="DeleteCertificateButton" Content="Удалить" Click="DeleteCertificate_Click" Margin="10,0,0,0" Padding="13,8" VerticalAlignment="Bottom"
+                                    ToolTip="Удалить сохранённый сертификат из TrollDock">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                        <Setter Property="IsEnabled" Value="True" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding SelectedItem, ElementName=SavedCertificateComboBox}" Value="{x:Null}">
+                                                <Setter Property="IsEnabled" Value="False" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                        </Grid>
+                        <Grid Margin="0,0,0,14">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="14" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Сертификат · .p12" Style="{StaticResource Caption}" />
+                                <Button x:Name="ChooseCertificateButton" Content="Выбрать сертификат" Click="ChooseCertificate_Click" HorizontalContentAlignment="Left" Padding="13,8" />
+                                <TextBlock x:Name="CertificatePathText" Text="Файл не выбран" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="1,6,0,0"
+                                           TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Text="Профиль · .mobileprovision" Style="{StaticResource Caption}" />
+                                <Button x:Name="ChooseProvisionButton" Content="Выбрать профиль" Click="ChooseProvision_Click" Padding="13,8" />
+                                <TextBlock x:Name="ProvisionPathText" Text="Файл не выбран" Foreground="{StaticResource MutedBrush}" FontSize="11" Margin="1,6,0,0"
+                                           TextTrimming="CharacterEllipsis" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}" />
+                            </StackPanel>
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="14" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Text="Пароль сертификата" Style="{StaticResource Caption}" />
+                                <PasswordBox x:Name="CertificatePasswordBox" AutomationProperties.Name="Пароль сертификата" />
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <CheckBox x:Name="SaveCertificateCheckBox" Content="Сохранить сертификат с именем" IsChecked="False" FontSize="12" Margin="0,0,0,7" />
+                                <Grid IsEnabled="{Binding IsChecked, ElementName=SaveCertificateCheckBox}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox x:Name="CertificateNameBox" AutomationProperties.Name="Имя сохранённого сертификата" ToolTip="Название, по которому вы узнаете сертификат" />
+                                    <Button Grid.Column="1" x:Name="SaveCertificateButton" Content="Сохранить" Click="SaveCertificate_Click" Margin="8,0,0,0" Padding="11,8" FontSize="12" />
+                                </Grid>
+                            </StackPanel>
+                        </Grid>
+                        <Border Background="#F1F6FF" CornerRadius="8" Padding="11,9" Margin="0,15,0,0">
+                            <TextBlock Foreground="#526A8C" FontSize="11" TextWrapping="Wrap"
+                                       Text="Исходная IPA останется без изменений. Временная подписанная копия удалится с ПК без корзины после установки." />
+                        </Border>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17" Margin="0,0,0,16">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="Ваш iPhone" FontWeight="SemiBold" FontSize="15" />
+                            <TextBlock Grid.Column="1" Text="Подключите кабель и разблокируйте экран" FontSize="11" Foreground="{StaticResource MutedBrush}" />
+                        </Grid>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox x:Name="DeviceComboBox" AutomationProperties.Name="Подключённый iPhone" ToolTip="Выберите iPhone, подключённый по USB" />
+                            <Button Grid.Column="1" x:Name="RefreshButton" Content="Обновить" Click="RefreshDevices_Click" Margin="10,0,0,0" Padding="13,8" ToolTip="Найти подключённые устройства" />
+                            <Button Grid.Column="2" x:Name="ConnectButton" Content="Проверить связь" Click="Connect_Click" Margin="8,0,0,0" Padding="13,8">
+                                <Button.Style>
+                                    <Style TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsChecked, ElementName=CertificateModeRadioButton}" Value="True">
+                                                <Setter Property="Visibility" Value="Collapsed" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Button.Style>
+                            </Button>
+                        </Grid>
+                        <TextBlock x:Name="ConnectAutohintText" Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,10,0,0" TextWrapping="Wrap">
+                            <TextBlock.Style>
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="Text" Value="Соединение SSH откроется автоматически при установке." />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=CertificateModeRadioButton}" Value="True">
+                                            <Setter Property="Text" Value="Нажмите «Доверять» на iPhone, если он попросит. SSH для этой установки не нужен." />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </TextBlock.Style>
+                        </TextBlock>
+
+                        <Expander x:Name="ConnectionSettingsExpander" Header="Доступ SSH и дополнительные настройки" Margin="0,15,0,0" Foreground="#52647E" FontSize="12">
+                            <Expander.Style>
+                                <Style TargetType="Expander">
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding IsChecked, ElementName=CertificateModeRadioButton}" Value="True">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Expander.Style>
+                            <StackPanel Margin="0,14,0,1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="14" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Text="Пользователь SSH" Style="{StaticResource Caption}" />
+                                        <TextBox x:Name="UsernameBox" Text="root" AutomationProperties.Name="Пользователь SSH" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Text="Пароль SSH" Style="{StaticResource Caption}" />
+                                        <PasswordBox x:Name="PasswordBox" AutomationProperties.Name="Пароль SSH" />
+                                    </StackPanel>
+                                </Grid>
+                                <CheckBox x:Name="RememberPasswordCheckBox" Content="Запомнить пароль на этом компьютере" IsChecked="False" Margin="0,12,0,0" />
+                                <Border BorderBrush="#E8EDF4" BorderThickness="0,1,0,0" Margin="0,16,0,0" Padding="0,14,0,0">
+                                    <StackPanel>
+                                        <RadioButton x:Name="AutoUsbRadioButton" GroupName="ConnectionMode" IsChecked="True" Content="USB: открыть туннель автоматически" />
+                                        <RadioButton x:Name="ExistingTunnelRadioButton" GroupName="ConnectionMode" Content="Использовать уже открытый SSH-туннель" Margin="0,10,0,0" />
+                                        <Grid Margin="21,10,0,0">
+                                            <Grid.Style>
+                                                <Style TargetType="Grid">
+                                                    <Setter Property="IsEnabled" Value="False" />
+                                                    <Setter Property="Opacity" Value="0.45" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsChecked, ElementName=ExistingTunnelRadioButton}" Value="True">
+                                                            <Setter Property="IsEnabled" Value="True" />
+                                                            <Setter Property="Opacity" Value="1" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Grid.Style>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="14" />
+                                                <ColumnDefinition Width="100" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="Адрес" Style="{StaticResource Caption}" />
+                                                <TextBox x:Name="TunnelHostBox" Text="127.0.0.1" AutomationProperties.Name="Адрес SSH-туннеля" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="2">
+                                                <TextBlock Text="Порт" Style="{StaticResource Caption}" />
+                                                <TextBox x:Name="TunnelPortBox" Text="22" AutomationProperties.Name="Порт SSH-туннеля" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </Expander>
+                    </StackPanel>
+                </Border>
+
+                <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17">
+                    <StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock x:Name="StageText" Text="Готовы к установке" FontWeight="SemiBold" FontSize="15" TextWrapping="Wrap" Margin="0,0,12,0" />
+                            <TextBlock Grid.Column="1" x:Name="TransferText" Text="" Foreground="#67768D" FontSize="11" />
+                        </Grid>
+                        <TextBlock x:Name="DetailText" Text="Выберите IPA. Программа найдёт TrollStore и передаст файл на iPhone." Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,7,0,12" TextWrapping="Wrap" />
+                        <ProgressBar x:Name="InstallProgressBar" Height="6" Minimum="0" Maximum="100" Value="0" Foreground="#2165E8" Background="#EAF0F8" BorderThickness="0" />
+                        <Expander x:Name="LogExpander" Header="Журнал подключения и установки" Margin="0,14,0,0" FontSize="12" Foreground="#52647E">
+                            <TextBox x:Name="LogTextBox" IsReadOnly="True" FontFamily="Consolas" FontSize="11" TextWrapping="Wrap"
+                                     VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"
+                                     Height="150" Margin="0,10,0,0" Background="#F6F8FC" Foreground="#415671" BorderThickness="0"
+                                     AutomationProperties.Name="Журнал подключения и установки" />
+                        </Expander>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+
+        <Border Grid.Row="2" Background="White" BorderBrush="#E2E8F0" BorderThickness="0,1,0,0" Padding="28,16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="Без пересылки в облако" FontSize="12" FontWeight="SemiBold" Foreground="#52647E" />
+                    <TextBlock Text="Файл передаётся прямо на ваш iPhone" FontSize="11" Foreground="#8390A4" Margin="0,3,0,0" TextWrapping="Wrap" />
+                </StackPanel>
+                <Button Grid.Column="1" x:Name="CancelButton" Content="Отмена" Click="Cancel_Click" IsEnabled="False" Margin="0,0,10,0" Padding="17,11" />
+                <Button Grid.Column="2" x:Name="InstallButton" Content="Установить на iPhone  →" Click="Install_Click" Style="{StaticResource PrimaryButton}" Padding="23,12" FontSize="14" MinWidth="225" IsDefault="True" />
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
