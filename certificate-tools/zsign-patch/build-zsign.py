@@ -23,8 +23,8 @@ import zipfile
 UPSTREAM_COMMIT = "9299685bab7ef99827e06e5dfda93af747386590"
 SOURCE_URL = f"https://codeload.github.com/zhlynn/zsign/zip/{UPSTREAM_COMMIT}"
 SOURCE_SHA256 = "7b61b2f2a29113d2fdf970599dca5ec4709d1b524cdd571c9a1f7cb3d28c3b73"
-PATCH_SHA256 = "361b8a9c496bf8fb03b927e3ab45fd9679d46618e215af2a2ef5ecd45844972f"
-VERSION = "1.1.3-trolldock.1"
+PATCH_SHA256 = "6a2bb0fb310304c775c2ffe858aca94f224d133a7c209f8918eef3f78e62af8a"
+VERSION = "1.1.3-trolldock.2"
 
 
 def digest(path: Path) -> str:
@@ -60,7 +60,8 @@ def main() -> None:
             archive.write_bytes(response.read())
     if digest(archive) != SOURCE_SHA256:
         raise SystemExit("Official source archive SHA-256 mismatch.")
-    extraction = root / ("source-" + uuid.uuid4().hex)
+    # Keep MSBuild's deep .tlog paths below legacy tool limits in normal clones.
+    extraction = root / ("src-" + uuid.uuid4().hex[:12])
     extraction.mkdir()
     with zipfile.ZipFile(archive) as package:
         for entry in package.infolist():
@@ -99,7 +100,7 @@ def main() -> None:
     command = [str(msbuild), str(source / "build/windows/vs2022/zsign.sln"),
                "/p:Configuration=Release", "/p:Platform=x64", f"/p:PlatformToolset={args.toolset}",
                f"/p:VCToolsVersion={args.vc_tools_version}", f"/p:WindowsTargetPlatformVersion={args.windows_sdk}",
-               f"/p:ExtraDefines=ZSIGN_VERSION={VERSION}", "/p:ExtraResourceDefines=ZSIGN_VERSION_NUM=1%2C1%2C3%2C1",
+               f"/p:ExtraDefines=ZSIGN_VERSION={VERSION}", "/p:ExtraResourceDefines=ZSIGN_VERSION_NUM=1%2C1%2C3%2C2",
                "/m", "/verbosity:minimal", "/nologo"]
     build_log = root / "build.log"
     with build_log.open("wb") as output:

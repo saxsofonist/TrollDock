@@ -11,6 +11,11 @@ using TrollDock.Services;
 var passed = 0;
 void Check(bool value, string message) { if (!value) throw new Exception(message); passed++; Console.WriteLine("PASS " + message); }
 void Reject(Action action, string message) { try { action(); } catch (Exception e) when (e is InvalidDataException or InvalidOperationException or ArgumentException) { passed++; Console.WriteLine("PASS " + message); return; } throw new Exception("Did not reject: " + message); }
+Dictionary<string, XElement> ReadEntitlements(string path)
+{
+    var elements = XDocument.Load(path).Root!.Element("dict")!.Elements().ToArray();
+    return Enumerable.Range(0, elements.Length / 2).ToDictionary(i => elements[i * 2].Value, i => elements[i * 2 + 1]);
+}
 using var rsa = RSA.Create(2048);
 var request = new CertificateRequest("CN=TrollDock Test Identity, OU=TEAM123456", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
 using var certificate = request.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(30));
@@ -19,7 +24,8 @@ var p12 = certificate.Export(X509ContentType.Pkcs12, password);
 var originalP12Hash = SHA256.HashData(p12);
 var bcCertificate = new X509CertificateParser().ReadCertificate(certificate.RawData);
 var bcPrivate = PrivateKeyFactory.CreateKey(rsa.ExportPkcs8PrivateKey());
-byte[] Profile(bool expired = false, bool appStore = false, bool all = false, bool mismatch = false, string keychainPattern = "OLDPREFIX1.*")
+byte[] Profile(bool expired = false, bool appStore = false, bool all = false, bool mismatch = false,
+    string keychainPattern = "OLDPREFIX1.*", string applicationIdentifier = "OLDPREFIX1.com.example.*")
 {
     var doc = new XDocument(new XElement("plist", new XAttribute("version", "1.0"), new XElement("dict",
         new XElement("key", "Name"), new XElement("string", "Test Development"),
@@ -28,7 +34,7 @@ byte[] Profile(bool expired = false, bool appStore = false, bool all = false, bo
         new XElement("key", "CreationDate"), new XElement("date", DateTime.UtcNow.AddDays(-3).ToString("O")),
         new XElement("key", "TeamIdentifier"), new XElement("array", new XElement("string", "TEAM123456")),
         new XElement("key", "ApplicationIdentifierPrefix"), new XElement("array", new XElement("string", "OLDPREFIX1")),
-        new XElement("key", "Entitlements"), new XElement("dict", new XElement("key", "application-identifier"), new XElement("string", "OLDPREFIX1.com.example.*"), new XElement("key", "com.apple.developer.team-identifier"), new XElement("string", "TEAM123456"),
+        new XElement("key", "Entitlements"), new XElement("dict", new XElement("key", "application-identifier"), new XElement("string", applicationIdentifier), new XElement("key", "com.apple.developer.team-identifier"), new XElement("string", "TEAM123456"),
             new XElement("key", "keychain-access-groups"), new XElement("array", new XElement("string", keychainPattern), new XElement("string", "TEAM123456.shared-explicit"))),
         new XElement("key", "DeveloperCertificates"), new XElement("array", new XElement("data", Convert.ToBase64String(mismatch ? [1, 2, 3] : certificate.RawData)))
     )));
@@ -53,8 +59,6 @@ if (Environment.GetEnvironmentVariable("TROLLDOCK_WRITE_SIGNING_FIXTURE") == "1"
 using var material = SigningMaterial.Load(p12, profile, password);
 Check(material.Metadata.TeamId == "TEAM123456", "parse team and legacy App ID prefix");
 Check(material.Metadata.Name == "Test Development", "parse profile name");
-Check(material.AllowsBundleIdentifier("com.example.application"), "wildcard accepts matching bundle");
-Check(!material.AllowsBundleIdentifier("com.other.application"), "wildcard rejects another bundle");
 material.CheckDevice("00000001-0000000000000001"); Check(true, "registered device accepted");
 Reject(() => material.CheckDevice("other"), "unregistered device rejected");
 Reject(() => SigningMaterial.Load(p12, profile, "wrong"), "wrong P12 password rejected");
@@ -77,15 +81,42 @@ try
     Check(exported.Metadata.TeamId == material.Metadata.TeamId, "temporary P12 signs without command-line password");
     Check(originalP12Hash.AsSpan().SequenceEqual(SHA256.HashData(p12)), "source P12 remains byte-for-byte unchanged");
     Check(profile.AsSpan().SequenceEqual(File.ReadAllBytes(files.ProfilePath)), "profile temporary copy is exact");
-    var entitlements = XDocument.Load(material.WriteEntitlements(testRoot, "com.example.application"));
-    var entitlementElements = entitlements.Root!.Element("dict")!.Elements().ToArray();
-    var entitlementValues = Enumerable.Range(0, entitlementElements.Length / 2).ToDictionary(i => entitlementElements[i * 2].Value, i => entitlementElements[i * 2 + 1]);
+    var entitlementsPath = material.WriteEntitlements(testRoot, "com.example.application");
+    var entitlementValues = ReadEntitlements(entitlementsPath);
+    Check(!File.ReadAllBytes(entitlementsPath).AsSpan().StartsWith(new byte[] { 0xEF, 0xBB, 0xBF }), "entitlements XML is UTF-8 without BOM");
     Check(entitlementValues["application-identifier"].Value == "OLDPREFIX1.com.example.application", "resolved application identifier uses actual legacy prefix");
     Check(entitlementValues["com.apple.developer.team-identifier"].Value == "TEAM123456", "resolved entitlements preserve actual Team ID");
     Check(entitlementValues["keychain-access-groups"].Elements().Select(e => e.Value).SequenceEqual(["OLDPREFIX1.com.example.application", "TEAM123456.shared-explicit"]), "keychain wildcard resolves and explicit shared group is preserved");
-    Reject(() => material.WriteEntitlements(testRoot, "com.other.app"), "entitlements reject unpermitted bundle identifier");
-    using (var ambiguous = SigningMaterial.Load(p12, Profile(keychainPattern: "TEAM123456.*"), password))
-        Reject(() => ambiguous.WriteEntitlements(testRoot, "com.example.app"), "keychain wildcard with incompatible prefix fails clearly");
+    var otherBundle = ReadEntitlements(material.WriteEntitlements(testRoot, "com.other.app"));
+    Check(otherBundle["application-identifier"].Value == "OLDPREFIX1.com.example.com.other.app", "partial wildcard resolves an unrelated bundle within the profile grant");
+    Check(otherBundle["keychain-access-groups"].Elements().First().Value == "OLDPREFIX1.com.example.com.other.app", "keychain wildcard prefers the resolved signing identity");
+    var explicitProfile = Profile(applicationIdentifier: "OLDPREFIX1.com.profile.registered", keychainPattern: "OLDPREFIX1.com.profile.shared");
+    using (var explicitMaterial = SigningMaterial.Load(p12, explicitProfile, password))
+    {
+        foreach (var bundle in new[] { "com.unrelated.application", "org.Other.SecondApp", "org.Other.SecondApp.extension" })
+        {
+            var values = ReadEntitlements(explicitMaterial.WriteEntitlements(testRoot, bundle));
+            Check(values["application-identifier"].Value == "OLDPREFIX1.com.profile.registered", "explicit signing identity is retained for " + bundle);
+            Check(values["keychain-access-groups"].Elements().Select(e => e.Value).SequenceEqual(["OLDPREFIX1.com.profile.shared", "TEAM123456.shared-explicit"]), "explicit keychain grants are retained for " + bundle);
+        }
+        Check(explicitMaterial.ProfileBytes.AsSpan().SequenceEqual(explicitProfile), "entitlement generation leaves the signed explicit profile unchanged");
+    }
+    using (var separateKeychainPrefix = SigningMaterial.Load(p12, Profile(applicationIdentifier: "OLDPREFIX1.*", keychainPattern: "TEAM123456.shared.*"), password))
+    {
+        var values = ReadEntitlements(separateKeychainPrefix.WriteEntitlements(testRoot, "com.example.app"));
+        Check(values["application-identifier"].Value == "OLDPREFIX1.com.example.app", "universal wildcard retains the actual legacy prefix");
+        Check(values["keychain-access-groups"].Elements().First().Value == "TEAM123456.shared.com.example.app", "keychain wildcard fallback stays inside its own prefix grant");
+    }
+    using (var explicitWithWildcardKeychain = SigningMaterial.Load(p12, Profile(applicationIdentifier: "OLDPREFIX1.com.profile.registered"), password))
+        Check(ReadEntitlements(explicitWithWildcardKeychain.WriteEntitlements(testRoot, "com.unrelated.application"))["keychain-access-groups"].Elements().First().Value == "OLDPREFIX1.com.profile.registered", "wildcard keychain group resolves to the explicit signing identity");
+    foreach (var invalidPattern in new[] { "OLDPREFIX1.com.*.app", "OLDPREFIX1.*.*" })
+    {
+        using var invalidApplication = SigningMaterial.Load(p12, Profile(applicationIdentifier: invalidPattern), password);
+        Reject(() => invalidApplication.WriteEntitlements(testRoot, "com.example.app"), "malformed application wildcard is rejected: " + invalidPattern);
+        using var invalidKeychain = SigningMaterial.Load(p12, Profile(keychainPattern: invalidPattern), password);
+        Reject(() => invalidKeychain.WriteEntitlements(testRoot, "com.example.app"), "malformed keychain wildcard is rejected: " + invalidPattern);
+    }
+    Reject(() => material.WriteEntitlements(testRoot, "com.*.app"), "IPA bundle identifier cannot contain a wildcard");
     var vault = new CertificateVault(Path.Combine(testRoot, "vault"));
     try
     {

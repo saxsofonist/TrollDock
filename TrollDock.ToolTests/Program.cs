@@ -95,8 +95,12 @@ List<string> DerStrings(byte[] data)
     }
     Read(data, 0); return result;
 }
-void VerifyBundle(ZipArchive archive, string bundlePath, string appIdentifier, byte[] profile)
+void VerifyBundle(ZipArchive archive, string bundlePath, string appIdentifier, byte[] profile, string[]? expectedKeychainGroups = null)
 {
+    expectedKeychainGroups ??= [appIdentifier];
+    var expectedBundleId = bundlePath.EndsWith(".appex", StringComparison.Ordinal) ? "com.example.trolldock.test.extension" : "com.example.trolldock.test";
+    using var infoStream = new MemoryStream(ZipBytes(archive, bundlePath + "/Info.plist"));
+    Check(Dictionary(XDocument.Load(infoStream).Root!.Element("dict")!)["CFBundleIdentifier"].Value == expectedBundleId, bundlePath + " original CFBundleIdentifier retained");
     var executable = ZipBytes(archive, bundlePath + "/TestFixture");
     var codeResources = ZipBytes(archive, bundlePath + "/_CodeSignature/CodeResources");
     Check(ZipBytes(archive, bundlePath + "/embedded.mobileprovision").AsSpan().SequenceEqual(profile), bundlePath + " exact original provisioning profile");
@@ -120,6 +124,9 @@ void VerifyBundle(ZipArchive archive, string bundlePath, string appIdentifier, b
     var certificates = cms.GetCertificates();
     Check(cms.GetSignerInfos().GetSigners().Count > 0 && cms.GetSignerInfos().GetSigners().All(signer => certificates.EnumerateMatches(signer.SignerID).Any(signer.Verify)), bundlePath + " CMS signature verifies");
     uint CD(int offset) => BinaryPrimitives.ReadUInt32BigEndian(directory.AsSpan(offset, 4));
+    var identifierOffset = checked((int)CD(20));
+    var identifierLength = Array.IndexOf(directory, (byte)0, identifierOffset) - identifierOffset;
+    Check(Encoding.UTF8.GetString(directory, identifierOffset, identifierLength) == expectedBundleId, bundlePath + " CodeDirectory identifier matches original bundle ID independently of entitlement identity");
     var hashOffset = checked((int)CD(16)); var codeSlots = CD(28); var codeLimit = checked((int)CD(32));
     var hashSize = directory[36]; var pageSize = 1 << directory[39];
     Check(directory[37] == 2 && hashSize == 32, bundlePath + " SHA-256 code directory");
@@ -134,9 +141,10 @@ void VerifyBundle(ZipArchive archive, string bundlePath, string appIdentifier, b
     var entitlements = Dictionary(XDocument.Load(xml).Root!.Element("dict")!);
     Check(entitlements["application-identifier"].Value == appIdentifier, bundlePath + " exact XML application identifier");
     Check(entitlements["com.apple.developer.team-identifier"].Value == "TEAM123456", bundlePath + " original Team ID retained independently of App ID prefix");
-    Check(entitlements["keychain-access-groups"].Elements().Select(e => e.Value).SequenceEqual([appIdentifier]), bundlePath + " concrete XML keychain group");
+    Check(entitlements["keychain-access-groups"].Elements().Select(e => e.Value).SequenceEqual(expectedKeychainGroups), bundlePath + " exact resolved XML keychain groups");
     var der = DerStrings(slots[7].AsSpan(8).ToArray());
-    Check(der.Contains("application-identifier") && der.Contains("keychain-access-groups") && der.Count(s => s == appIdentifier) == 2 && !der.Any(s => s.Contains('*')), bundlePath + " matching concrete DER entitlements");
+    var expectedIdentities = new[] { appIdentifier }.Concat(expectedKeychainGroups).GroupBy(s => s).ToArray();
+    Check(der.Contains("application-identifier") && der.Contains("keychain-access-groups") && expectedIdentities.All(group => der.Count(s => s == group.Key) == group.Count()) && !der.Any(s => s.Contains('*')), bundlePath + " matching concrete DER entitlements");
     using var resourcesStream = new MemoryStream(codeResources);
     var resources = Dictionary(XDocument.Load(resourcesStream).Root!.Element("dict")!);
     foreach (var item in Dictionary(resources["files2"]))
@@ -181,8 +189,14 @@ using (var signingKey = RSA.Create(2048))
     File.WriteAllBytes(Path.Combine(fixtureRoot, "profile.mobileprovision"), generator.Generate(new CmsProcessableByteArray(Encoding.UTF8.GetBytes(profile.ToString())), true).GetEncoded());
     var normalProfile = profile.ToString().Replace("OLDPREFIX1", "TEAM123456", StringComparison.Ordinal);
     File.WriteAllBytes(Path.Combine(fixtureRoot, "normal-profile.mobileprovision"), generator.Generate(new CmsProcessableByteArray(Encoding.UTF8.GetBytes(normalProfile)), true).GetEncoded());
-    var exactProfile = normalProfile.Replace("TEAM123456.com.example.*", "TEAM123456.com.example.trolldock.test", StringComparison.Ordinal);
+    var exactProfile = normalProfile.Replace("TEAM123456.com.example.*", "TEAM123456.app.synthetic.unrelated", StringComparison.Ordinal)
+        .Replace("TEAM123456.*", "TEAM123456.shared.specific", StringComparison.Ordinal);
     File.WriteAllBytes(Path.Combine(fixtureRoot, "exact-profile.mobileprovision"), generator.Generate(new CmsProcessableByteArray(Encoding.UTF8.GetBytes(exactProfile)), true).GetEncoded());
+    var partialProfile = normalProfile.Replace("TEAM123456.com.example.*", "TEAM123456.allowed.prefix.*", StringComparison.Ordinal)
+        .Replace("TEAM123456.*", "TEAM123456.other.keychain.*", StringComparison.Ordinal);
+    File.WriteAllBytes(Path.Combine(fixtureRoot, "partial-profile.mobileprovision"), generator.Generate(new CmsProcessableByteArray(Encoding.UTF8.GetBytes(partialProfile)), true).GetEncoded());
+    var malformedProfile = normalProfile.Replace("TEAM123456.com.example.*", "TEAM123456.invalid.*.suffix", StringComparison.Ordinal);
+    File.WriteAllBytes(Path.Combine(fixtureRoot, "malformed-profile.mobileprovision"), generator.Generate(new CmsProcessableByteArray(Encoding.UTF8.GetBytes(malformedProfile)), true).GetEncoded());
 }
 var runner = new CertificateToolRunner(toolRoot);
 await runner.VerifyToolsAsync(); Check(true, "pinned executable hashes");
@@ -320,8 +334,25 @@ try
     }
     var exactJob = Path.Combine(testRoot, "exact-profile"); Directory.CreateDirectory(exactJob);
     foreach (var file in new[] { "unsigned-extension.ipa", "identity.p12", "exact-profile.mobileprovision" }) File.Copy(Path.Combine(fixtureRoot, file), Path.Combine(exactJob, file));
-    await RejectAsync(() => runner.SignAsync(Path.Combine(exactJob, "unsigned-extension.ipa"), Path.Combine(exactJob, "identity.p12"), Path.Combine(exactJob, "exact-profile.mobileprovision"), Path.Combine(exactJob, "signed.ipa"), exactJob, _ => { }), "profile allowing only the main app rejects an unpermitted nested extension");
-    Check(!File.Exists(Path.Combine(exactJob, "signed.ipa")), "unpermitted extension does not produce an installable output archive");
+    await runner.SignAsync(Path.Combine(exactJob, "unsigned-extension.ipa"), Path.Combine(exactJob, "identity.p12"), Path.Combine(exactJob, "exact-profile.mobileprovision"), Path.Combine(exactJob, "signed.ipa"), exactJob, _ => { });
+    using (var exactArchive = ZipFile.OpenRead(Path.Combine(exactJob, "signed.ipa")))
+    {
+        var profileBytes = File.ReadAllBytes(Path.Combine(exactJob, "exact-profile.mobileprovision"));
+        VerifyBundle(exactArchive, "Payload/TestFixture.app", "TEAM123456.app.synthetic.unrelated", profileBytes, ["TEAM123456.shared.specific"]);
+        VerifyBundle(exactArchive, "Payload/TestFixture.app/PlugIns/Sample.appex", "TEAM123456.app.synthetic.unrelated", profileBytes, ["TEAM123456.shared.specific"]);
+    }
+    var partialJob = Path.Combine(testRoot, "partial-profile"); Directory.CreateDirectory(partialJob);
+    foreach (var file in new[] { "unsigned-extension.ipa", "identity.p12", "partial-profile.mobileprovision" }) File.Copy(Path.Combine(fixtureRoot, file), Path.Combine(partialJob, file));
+    await runner.SignAsync(Path.Combine(partialJob, "unsigned-extension.ipa"), Path.Combine(partialJob, "identity.p12"), Path.Combine(partialJob, "partial-profile.mobileprovision"), Path.Combine(partialJob, "signed.ipa"), partialJob, _ => { });
+    using (var partialArchive = ZipFile.OpenRead(Path.Combine(partialJob, "signed.ipa")))
+    {
+        var profileBytes = File.ReadAllBytes(Path.Combine(partialJob, "partial-profile.mobileprovision"));
+        VerifyBundle(partialArchive, "Payload/TestFixture.app", "TEAM123456.allowed.prefix.com.example.trolldock.test", profileBytes, ["TEAM123456.other.keychain.com.example.trolldock.test"]);
+        VerifyBundle(partialArchive, "Payload/TestFixture.app/PlugIns/Sample.appex", "TEAM123456.allowed.prefix.com.example.trolldock.test.extension", profileBytes, ["TEAM123456.other.keychain.com.example.trolldock.test.extension"]);
+    }
+    var malformedJob = Path.Combine(testRoot, "malformed-profile"); Directory.CreateDirectory(malformedJob);
+    foreach (var file in new[] { "unsigned.ipa", "identity.p12", "malformed-profile.mobileprovision" }) File.Copy(Path.Combine(fixtureRoot, file), Path.Combine(malformedJob, file));
+    await RejectAsync(() => runner.SignAsync(Path.Combine(malformedJob, "unsigned.ipa"), Path.Combine(malformedJob, "identity.p12"), Path.Combine(malformedJob, "malformed-profile.mobileprovision"), Path.Combine(malformedJob, "signed.ipa"), malformedJob, _ => { }), "malformed wildcard identity fails signing");
     var corruptJob = Path.Combine(testRoot, "corrupt-profile"); Directory.CreateDirectory(corruptJob);
     foreach (var file in new[] { "unsigned.ipa", "identity.p12" }) File.Copy(Path.Combine(fixtureRoot, file), Path.Combine(corruptJob, file));
     File.WriteAllBytes(Path.Combine(corruptJob, "profile.mobileprovision"), [0, 1, 2, 3]);
@@ -329,13 +360,13 @@ try
     var workflowInput = Path.Combine(fixtureRoot, "unsigned-extension.ipa");
     var workflowOriginalHash = SHA256.HashData(File.ReadAllBytes(workflowInput));
     var workflowStaging = Path.Combine(testRoot, "workflow-staging-测试-🧪");
-    var workflowProfile = File.ReadAllBytes(Path.Combine(fixtureRoot, "normal-profile.mobileprovision"));
+    var workflowProfile = File.ReadAllBytes(Path.Combine(fixtureRoot, "exact-profile.mobileprovision"));
     using var workflowMaterial = SigningMaterial.Load(File.ReadAllBytes(Path.Combine(fixtureRoot, "identity.p12")), workflowProfile, "");
     var simulatedUsb = new RealSignFakeInstall(runner, ipa =>
     {
         using var signedArchive = ZipFile.OpenRead(ipa);
-        VerifyBundle(signedArchive, "Payload/TestFixture.app", "TEAM123456.com.example.trolldock.test", workflowProfile);
-        VerifyBundle(signedArchive, "Payload/TestFixture.app/PlugIns/Sample.appex", "TEAM123456.com.example.trolldock.test.extension", workflowProfile);
+        VerifyBundle(signedArchive, "Payload/TestFixture.app", "TEAM123456.app.synthetic.unrelated", workflowProfile, ["TEAM123456.shared.specific"]);
+        VerifyBundle(signedArchive, "Payload/TestFixture.app/PlugIns/Sample.appex", "TEAM123456.app.synthetic.unrelated", workflowProfile, ["TEAM123456.shared.specific"]);
     });
     var progress = new List<TransferProgress>();
     await new CertificateInstallWorkflow(simulatedUsb, workflowStaging).InstallAsync(workflowInput, workflowMaterial,

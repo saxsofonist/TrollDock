@@ -12,9 +12,9 @@ namespace TrollDock.Services;
 /// <summary>Runs the pinned, bundled signing and Apple USB installation tools. Never accepts a password.</summary>
 public sealed class CertificateToolRunner
 {
-    public const string ZsignVersion = "1.1.3-trolldock.1";
+    public const string ZsignVersion = "1.1.3-trolldock.2";
     public const string GoIosVersion = "1.3.2";
-    public const string ZsignSha256 = "710DC3718057531C7D048F8785E175EBC47E1F33E602D9AE3EE6A6C4490372D2";
+    public const string ZsignSha256 = "2478EE1FA1EB557ED431114CFD1C3D1697B9D171F31C4FA3095A007CEA8EC7E3";
     public const string GoIosSha256 = "C99B04F1D615FA716637EFAE457D5C554F32259F9D249375DE0086E3CC1A1DF5";
     private readonly string _toolRoot;
 

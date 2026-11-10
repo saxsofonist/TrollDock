@@ -24,7 +24,7 @@ diff --git a/src/archo.cpp b/src/archo.cpp
 diff --git a/src/bundle.cpp b/src/bundle.cpp
 --- a/src/bundle.cpp
 +++ b/src/bundle.cpp
-@@ -407,21 +407,31 @@
+@@ -407,21 +407,29 @@
  	// generated: the seal hashes every file in the bundle, so a profile
  	// written after sealing leaves the bundle failing Apple's verifier with
  	// "a sealed resource is missing or invalid" (codesign --verify --strict).
@@ -43,7 +43,7 @@ diff --git a/src/bundle.cpp b/src/bundle.cpp
 +		if (m_pSignAssets) {
 +			ZSignAsset* pMatchedAsset = NULL;
 +			for (auto it = m_pSignAssets->rbegin(); it != m_pSignAssets->rend(); ++it) {
-+				if (it->AllowsBundleId(strBundleId)) {
++				if (it->MatchesBundleId(strBundleId)) {
 +					pMatchedAsset = &(*it);
 +					break;
  				}
@@ -52,14 +52,12 @@ diff --git a/src/bundle.cpp b/src/bundle.cpp
 -			}
 -		}
 +			}
-+			if (NULL == pMatchedAsset) {
-+				ZLog::ErrorV(">>> No profile permits bundle identifier: %s\n", strBundleId.c_str());
-+				return false;
++			if (NULL != pMatchedAsset) {
++				m_pSignAsset = pMatchedAsset;
 +			}
-+			m_pSignAsset = pMatchedAsset;
 +		}
-+		if (!m_pSignAsset->AllowsBundleId(strBundleId) || m_pSignAsset->m_strProvData.empty()) {
-+			ZLog::ErrorV(">>> Provisioning profile does not permit bundle identifier: %s\n", strBundleId.c_str());
++		if (m_pSignAsset->m_strProvData.empty()) {
++			ZLog::Error(">>> Missing provisioning profile!\n");
 +			return false;
 +		}
 +		if (!ZFile::WriteFileV(m_pSignAsset->m_strProvData, "%s/embedded.mobileprovision", strBaseFolder.c_str())) {
@@ -73,7 +71,7 @@ diff --git a/src/bundle.cpp b/src/bundle.cpp
 diff --git a/src/openssl.cpp b/src/openssl.cpp
 --- a/src/openssl.cpp
 +++ b/src/openssl.cpp
-@@ -825,6 +825,66 @@
+@@ -825,6 +825,89 @@
  	m_bSHA256Only = false;
  }
  
@@ -83,11 +81,30 @@ diff --git a/src/openssl.cpp b/src/openssl.cpp
 +	if (string::npos == star) {
 +		return strPattern == strIdentifier;
 +	}
-+	return star == strPattern.size() - 1 &&
++	return star == strPattern.size() - 1 && strIdentifier.size() > star &&
 +		0 == strIdentifier.compare(0, star, strPattern, 0, star);
 +}
 +
-+bool ZSignAsset::AllowsBundleId(const string& strBundleId) const
++static bool TrollDockResolveIdentifier(const string& strPattern, const string& strPreferred,
++	const string& strBundleId, string& strResolved)
++{
++	if (strPattern.empty()) {
++		return false;
++	}
++	size_t star = strPattern.find('*');
++	if (string::npos == star) {
++		strResolved = strPattern;
++		return true;
++	}
++	if (star != strPattern.size() - 1) {
++		return false;
++	}
++	strResolved = TrollDockIdentifierAllows(strPattern, strPreferred)
++		? strPreferred : strPattern.substr(0, star) + strBundleId;
++	return true;
++}
++
++bool ZSignAsset::MatchesBundleId(const string& strBundleId) const
 +{
 +	size_t dot = m_strApplicationId.find('.');
 +	if (strBundleId.empty() || string::npos == dot || 0 == dot) {
@@ -99,8 +116,12 @@ diff --git a/src/openssl.cpp b/src/openssl.cpp
 +
 +bool ZSignAsset::BuildBundleEntitlements(const string& strBundleId, string& strOutput) const
 +{
-+	if (!AllowsBundleId(strBundleId)) {
-+		ZLog::ErrorV(">>> Provisioning profile does not permit bundle identifier: %s\n", strBundleId.c_str());
++	size_t dot = m_strApplicationId.find('.');
++	string strIdentifier;
++	if (strBundleId.empty() || string::npos == dot || 0 == dot ||
++		!TrollDockResolveIdentifier(m_strApplicationId, m_strApplicationId.substr(0, dot + 1) + strBundleId,
++			strBundleId, strIdentifier)) {
++		ZLog::Error(">>> Invalid provisioning application identifier!\n");
 +		return false;
 +	}
 +	jvalue jvEntitlements;
@@ -108,9 +129,10 @@ diff --git a/src/openssl.cpp b/src/openssl.cpp
 +		ZLog::Error(">>> Invalid entitlements property list!\n");
 +		return false;
 +	}
-+	// Do not mutate the shared signing asset. Every nested executable gets its
-+	// own XML and DER entitlement blobs from the same resolved dictionary.
-+	string strIdentifier = m_strApplicationId.substr(0, m_strApplicationId.find('.') + 1) + strBundleId;
++	// The profile's explicit entitlement identity is independent of the bundle's
++	// CFBundleIdentifier / CodeDirectory identifier. Preserve it verbatim, as
++	// upstream zsign does. Resolve only wildcards within the granted pattern.
++	// Keep XML and DER consistent without mutating the shared signing asset.
 +	jvEntitlements["application-identifier"] = strIdentifier;
 +	if (jvEntitlements.has("keychain-access-groups")) {
 +		jvalue& groups = jvEntitlements["keychain-access-groups"];
@@ -124,13 +146,12 @@ diff --git a/src/openssl.cpp b/src/openssl.cpp
 +				return false;
 +			}
 +			string strGroup = groups[i].as_string();
-+			if (string::npos != strGroup.find('*')) {
-+				if (!TrollDockIdentifierAllows(strGroup, strIdentifier)) {
-+					ZLog::ErrorV(">>> Keychain wildcard does not permit bundle identifier: %s\n", strBundleId.c_str());
-+					return false;
-+				}
-+				groups[i] = strIdentifier;
++			string strResolved;
++			if (!TrollDockResolveIdentifier(strGroup, strIdentifier, strBundleId, strResolved)) {
++				ZLog::Error(">>> Invalid keychain access group pattern!\n");
++				return false;
 +			}
++			groups[i] = strResolved;
 +		}
 +	}
 +	jvEntitlements.style_write_plist(strOutput);
@@ -148,9 +169,9 @@ diff --git a/src/openssl.h b/src/openssl.h
  						const string& strAltnateCodeDirectorySlot256, 
  						string& strCMSOutput);
 +
-+	// TrollDock patch: provisioning identifiers must be resolved for each bundle,
-+	// including app extensions. The App ID prefix can differ from the Team ID.
-+	bool AllowsBundleId(const string& strBundleId) const;
++	// Prefer a matching profile when multiple are supplied; a single profile's
++	// explicit entitlement identity is not a CFBundleIdentifier restriction.
++	bool MatchesBundleId(const string& strBundleId) const;
 +	bool BuildBundleEntitlements(const string& strBundleId, string& strOutput) const;
  
  private:

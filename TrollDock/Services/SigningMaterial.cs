@@ -121,28 +121,21 @@ public sealed class SigningMaterial : IDisposable
             throw new InvalidDataException("Этот iPhone не включён в выбранный профиль. Добавьте его UDID в профиль разработчика и скачайте новый .mobileprovision.");
     }
 
-    public bool AllowsBundleIdentifier(string bundleIdentifier)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (string.IsNullOrWhiteSpace(bundleIdentifier)) return false;
-        var allowed = Metadata.ApplicationIdentifier[(Metadata.ApplicationIdentifier.IndexOf('.') + 1)..];
-        return allowed.EndsWith('*')
-            ? bundleIdentifier.StartsWith(allowed[..^1], StringComparison.Ordinal)
-            : allowed.Equals(bundleIdentifier, StringComparison.Ordinal);
-    }
-
-    /// <summary>Resolves profile wildcard identifiers for this app without assuming Team ID == App ID prefix.</summary>
+    /// <summary>Preserves explicit profile entitlements and resolves wildcard identities within
+    /// the profile's grants. Signing identity and the IPA's CFBundleIdentifier are separate.</summary>
     public string WriteEntitlements(string jobDirectory, string bundleIdentifier)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (!AllowsBundleIdentifier(bundleIdentifier) || bundleIdentifier.Contains('*'))
-            throw new InvalidDataException("Профиль не разрешает идентификатор выбранного приложения.");
+        if (string.IsNullOrWhiteSpace(bundleIdentifier) || bundleIdentifier.Length > 255
+            || !char.IsAsciiLetterOrDigit(bundleIdentifier[0])
+            || bundleIdentifier.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not '.' and not '-'))
+            throw new InvalidDataException("Некорректный идентификатор приложения в IPA.");
         if (!Directory.Exists(jobDirectory)) throw new DirectoryNotFoundException("Временный каталог задания не существует.");
         var profile = ReadSignedProfile(_profile);
         var dictionary = new XElement(Required(profile, "Entitlements"));
         var entitlements = ReadDictionary(dictionary);
         var prefix = Metadata.ApplicationIdentifier[..Metadata.ApplicationIdentifier.IndexOf('.')];
-        var exactIdentifier = prefix + "." + bundleIdentifier;
+        var exactIdentifier = ResolveIdentifierPattern(Metadata.ApplicationIdentifier, prefix + "." + bundleIdentifier, bundleIdentifier);
         Required(entitlements, "application-identifier").Value = exactIdentifier;
         if (entitlements.TryGetValue("keychain-access-groups", out var keychainGroups))
         {
@@ -153,9 +146,7 @@ public sealed class SigningMaterial : IDisposable
                     throw new InvalidDataException("В профиле некорректная группа Keychain.");
                 var pattern = group.Value;
                 if (!pattern.Contains('*')) continue;
-                if (!pattern.EndsWith('*') || pattern.Count(c => c == '*') != 1 || !exactIdentifier.StartsWith(pattern[..^1], StringComparison.Ordinal))
-                    throw new InvalidDataException("Профиль содержит неоднозначную wildcard-группу Keychain. Выберите профиль с группой доступа для этого приложения.");
-                group.Value = exactIdentifier;
+                group.Value = ResolveIdentifierPattern(pattern, exactIdentifier, bundleIdentifier);
             }
         }
         var path = Path.Combine(Path.GetFullPath(jobDirectory), "entitlements-" + Guid.NewGuid().ToString("N") + ".plist");
@@ -164,6 +155,17 @@ public sealed class SigningMaterial : IDisposable
         using (var writer = XmlWriter.Create(output, new XmlWriterSettings { Encoding = new UTF8Encoding(false), Indent = true, NewLineChars = "\n" }))
             document.Save(writer);
         return path;
+    }
+
+    private static string ResolveIdentifierPattern(string pattern, string preferredIdentifier, string bundleIdentifier)
+    {
+        var wildcard = pattern.IndexOf('*');
+        if (wildcard < 0) return pattern;
+        if (wildcard != pattern.Length - 1)
+            throw new InvalidDataException("Профиль содержит некорректный wildcard-идентификатор: допустима одна звёздочка в конце.");
+        var allowedPrefix = pattern[..wildcard];
+        return preferredIdentifier.Length > allowedPrefix.Length && preferredIdentifier.StartsWith(allowedPrefix, StringComparison.Ordinal)
+            ? preferredIdentifier : allowedPrefix + bundleIdentifier;
     }
 
     /// <summary>Writes an empty-password P12 in a private, unique child folder owned by the current job.

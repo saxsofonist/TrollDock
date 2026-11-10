@@ -1,10 +1,10 @@
 {
-  "version": "1.1.3-trolldock.1",
+  "version": "1.1.3-trolldock.2",
   "upstreamCommit": "9299685bab7ef99827e06e5dfda93af747386590",
   "sourceUrl": "https://codeload.github.com/zhlynn/zsign/zip/9299685bab7ef99827e06e5dfda93af747386590",
   "sourceSha256": "7b61b2f2a29113d2fdf970599dca5ec4709d1b524cdd571c9a1f7cb3d28c3b73",
-  "patchSha256": "361b8a9c496bf8fb03b927e3ab45fd9679d46618e215af2a2ef5ecd45844972f",
-  "executableSha256": "710dc3718057531c7d048f8785e175ebc47e1f33e602d9ae3ee6a6c4490372d2",
+  "patchSha256": "6a2bb0fb310304c775c2ffe858aca94f224d133a7c209f8918eef3f78e62af8a",
+  "executableSha256": "2478ee1fa1eb557ed431114cfd1c3d1697b9d171f31c4fa3095a007cea8ec7e3",
   "toolset": "v145",
   "vcToolsVersion": "14.50.35717",
   "windowsSdk": "10.0.26100.0",
@@ -28,5 +28,5 @@
     "activeCodePage": "UTF-8",
     "requestedExecutionLevel": "asInvoker"
   },
-  "validation": "144 offline integration checks passed, including cryptographic nested-bundle verification and Unicode paths beyond MAX_PATH. No real device installation."
+  "validation": "233 offline integration checks passed, including unrelated explicit profile identities, unchanged main/extension bundle and CodeDirectory identifiers, XML/DER/CMS verification, wildcard resolution, Unicode paths beyond MAX_PATH and workflow cleanup. No real device installation."
 }

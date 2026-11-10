@@ -52,8 +52,8 @@ def main():
     entry = next(tool for tool in manifest["tools"] if tool["name"] == "zsign")
     entry.update(version=provenance["version"],
                  distribution="TrollDock patched build; see zsign-patch/ for reproducible source recipe",
-                 releaseUrl="https://github.com/saxsofonist/TrollDock/releases/tag/v1.1.0",
-                 downloadUrl="https://github.com/saxsofonist/TrollDock/releases/download/v1.1.0/" + archive_name,
+                 releaseUrl="https://github.com/saxsofonist/TrollDock/releases/tag/v1.1.1",
+                 downloadUrl="https://github.com/saxsofonist/TrollDock/releases/download/v1.1.1/" + archive_name,
                  archiveName=archive_name, archiveSha256=archive_hash,
                  binarySha256=binary_hash, sourceArchiveUrl=provenance["sourceUrl"],
                  sourceArchiveSha256=provenance["sourceSha256"].upper(),

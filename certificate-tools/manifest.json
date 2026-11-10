@@ -5,16 +5,16 @@
   "tools": [
     {
       "name": "zsign",
-      "version": "1.1.3-trolldock.1",
+      "version": "1.1.3-trolldock.2",
       "repository": "https://github.com/zhlynn/zsign",
-      "releaseUrl": "https://github.com/saxsofonist/TrollDock/releases/tag/v1.1.0",
+      "releaseUrl": "https://github.com/saxsofonist/TrollDock/releases/tag/v1.1.1",
       "sourceCommit": "9299685bab7ef99827e06e5dfda93af747386590",
-      "downloadUrl": "https://github.com/saxsofonist/TrollDock/releases/download/v1.1.0/zsign-1.1.3-trolldock.1-win-x64.zip",
-      "archiveName": "zsign-1.1.3-trolldock.1-win-x64.zip",
-      "archiveSha256": "F30D7A4C45519B99384B7B8F66B6241930F96E0EE38EC67820895789E76A4325",
+      "downloadUrl": "https://github.com/saxsofonist/TrollDock/releases/download/v1.1.1/zsign-1.1.3-trolldock.2-win-x64.zip",
+      "archiveName": "zsign-1.1.3-trolldock.2-win-x64.zip",
+      "archiveSha256": "7FC6CE158B9E2B93F46CB211745365CA1C3A5E90ABB597D73238C4FB4432BCDB",
       "archiveMember": "zsign.exe",
       "binaryPath": "zsign/zsign.exe",
-      "binarySha256": "710DC3718057531C7D048F8785E175EBC47E1F33E602D9AE3EE6A6C4490372D2",
+      "binarySha256": "2478EE1FA1EB557ED431114CFD1C3D1697B9D171F31C4FA3095A007CEA8EC7E3",
       "license": "MIT",
       "licenseUrl": "https://raw.githubusercontent.com/zhlynn/zsign/9299685bab7ef99827e06e5dfda93af747386590/LICENSE",
       "licensePath": "licenses/zsign-LICENSE.txt",
@@ -22,7 +22,7 @@
       "distribution": "TrollDock patched build; see zsign-patch/ for reproducible source recipe",
       "sourceArchiveUrl": "https://codeload.github.com/zhlynn/zsign/zip/9299685bab7ef99827e06e5dfda93af747386590",
       "sourceArchiveSha256": "7B61B2F2A29113D2FDF970599DCA5EC4709D1B524CDD571C9A1F7CB3D28C3B73",
-      "patchSha256": "361B8A9C496BF8FB03B927E3AB45FD9679D46618E215AF2A2EF5ECD45844972F",
+      "patchSha256": "6A2BB0FB310304C775C2FFE858ACA94F224D133A7C209F8918EEF3F78E62AF8A",
       "sourceRecipe": "zsign-patch/build-zsign.ps1"
     },
     {

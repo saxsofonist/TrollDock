@@ -77,6 +77,29 @@ internal static class WorkflowChecks
                 await new CertificateInstallWorkflow(blocked, blockedStaging).InstallAsync(nestedIpa, legacyMaterial, Udid, new CaptureProgress(), _ => { }, cancellation.Token);
                 Check(blocked.SignCalled && blocked.InstallCalled && Directory.GetFileSystemEntries(blockedStaging).Length == 0, "legacy nested bundles are signed, installed and cleaned");
             }
+            using (var explicitMaterial = Material(legacy: true, applicationSuffix: "com.profile.registered"))
+            {
+                foreach (var nested in new[] { false, true })
+                {
+                    var bundle = nested ? "org.other.SecondApp" : "com.unrelated.first";
+                    var scenario = nested ? "explicit-nested" : "explicit-main";
+                    var source = Path.Combine(root, scenario + ".ipa");
+                    MakeIpa(source, false, extension: nested, bundle: bundle);
+                    var sourceHash = SHA256.HashData(File.ReadAllBytes(source));
+                    var metadata = IpaInspection.Read(source);
+                    using var cancellation = new CancellationTokenSource();
+                    var fake = new FakeTools(scenario, cancellation);
+                    var staging = Path.Combine(root, scenario);
+                    await new CertificateInstallWorkflow(fake, staging).InstallAsync(source, explicitMaterial, Udid, new CaptureProgress(), _ => { }, cancellation.Token);
+                    Check(fake.SignCalled && fake.InstallCalled, scenario + " allows an unrelated IPA Bundle ID with an explicit profile");
+                    Check(fake.SignedInputMetadata?.BundleIdentifier == bundle && fake.InstalledMetadata?.BundleIdentifier == bundle
+                        && fake.InstalledMetadata.ExtensionIdentifiers.SequenceEqual(metadata.ExtensionIdentifiers), scenario + " preserves main and nested IPA bundle identifiers");
+                    Check(fake.VerifiedBundle == bundle, scenario + " checks installation using original Bundle ID");
+                    Check(fake.ProfileHash!.AsSpan().SequenceEqual(SHA256.HashData(explicitMaterial.ProfileBytes)), scenario + " passes the original signed profile unchanged");
+                    Check(sourceHash.AsSpan().SequenceEqual(SHA256.HashData(File.ReadAllBytes(source))), scenario + " keeps source IPA byte-for-byte unchanged");
+                    Check(Directory.GetFileSystemEntries(staging).Length == 0, scenario + " deletes all temporary signing files");
+                }
+            }
             using (var cancellation = new CancellationTokenSource())
             {
                 var blocked = new FakeTools("cleanup-blocked", cancellation);
@@ -184,7 +207,7 @@ internal static class WorkflowChecks
             using (var stream = archive.CreateEntry("Payload/Demo.app/Watch/Watch.app/PlugIns/Widget.appex/Info.plist").Open()) stream.Write(XmlPlist(new() { ["CFBundleIdentifier"] = "com.example.app.watch.widget" }));
             using (var stream = archive.CreateEntry("Payload/Demo.app/AppClips/Clip.app/Info.plist").Open()) stream.Write(XmlPlist(new() { ["CFBundleIdentifier"] = "com.example.app.clip" }));
         }
-        Check(IpaInspection.Read(watch).ExtensionIdentifiers.SequenceEqual(["com.example.app.watch", "com.example.app.watch.widget", "com.example.app.clip"]), "nested watch extensions and App Clips checked against profile");
+        Check(IpaInspection.Read(watch).ExtensionIdentifiers.SequenceEqual(["com.example.app.watch", "com.example.app.watch.widget", "com.example.app.clip"]), "nested watch extensions and App Clips are identified for preservation checks");
         foreach (var unsafePath in new[]
         {
             "../outside", "/absolute", "C:/absolute", "Payload\\bad", "Payload/./bad",
@@ -227,7 +250,7 @@ internal static class WorkflowChecks
         }
         finally { File.Delete(AppSettings.SettingsPath); }
     }
-    private static SigningMaterial Material(bool legacy = false)
+    private static SigningMaterial Material(bool legacy = false, string applicationSuffix = "com.example.*")
     {
         using var rsa = RSA.Create(2048);
         var request = new CertificateRequest("CN=TrollDock Workflow Test", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
@@ -238,7 +261,7 @@ internal static class WorkflowChecks
             new XElement("key", "ExpirationDate"), new XElement("date", DateTime.UtcNow.AddDays(5).ToString("O")),
             new XElement("key", "TeamIdentifier"), new XElement("array", new XElement("string", "TEAM123456")),
             new XElement("key", "ApplicationIdentifierPrefix"), new XElement("array", new XElement("string", legacy ? "LEGACY1234" : "TEAM123456")),
-            new XElement("key", "Entitlements"), new XElement("dict", new XElement("key", "application-identifier"), new XElement("string", (legacy ? "LEGACY1234" : "TEAM123456") + ".com.example.*")),
+            new XElement("key", "Entitlements"), new XElement("dict", new XElement("key", "application-identifier"), new XElement("string", (legacy ? "LEGACY1234" : "TEAM123456") + "." + applicationSuffix)),
             new XElement("key", "DeveloperCertificates"), new XElement("array", new XElement("data", Convert.ToBase64String(certificate.RawData))),
             new XElement("key", "ProvisionedDevices"), new XElement("array", new XElement("string", Udid)))));
         var generator = new CmsSignedDataGenerator();
@@ -294,11 +317,16 @@ internal static class WorkflowChecks
     private sealed class FakeTools(string scenario, CancellationTokenSource cancellation) : ICertificateInstallTools
     {
         public bool SignCalled, InstallCalled, VerifyCalled, InputWasCopy, PrivateMaterialPresent, CustomEntitlementsPresent, EntitlementsWereExact;
+        public IpaMetadata? SignedInputMetadata, InstalledMetadata;
+        public string? VerifiedBundle;
+        public byte[]? ProfileHash;
         public FileStream? BlockingHandle;
         public Task VerifyToolsAsync(CancellationToken token) { token.ThrowIfCancellationRequested(); return Task.CompletedTask; }
         public Task SignAsync(string input, string p12, string profile, string output, string job, Action<string> log, CancellationToken token, string? entitlementsPath = null)
         {
             SignCalled = true;
+            SignedInputMetadata = IpaInspection.Read(input);
+            ProfileHash = SHA256.HashData(File.ReadAllBytes(profile));
             CustomEntitlementsPresent = entitlementsPath is not null && File.Exists(entitlementsPath);
             if (CustomEntitlementsPresent)
             {
@@ -321,6 +349,7 @@ internal static class WorkflowChecks
         {
             InstallCalled = true;
             if (!File.Exists(ipa)) throw new Exception("No signed IPA during installation");
+            InstalledMetadata = IpaInspection.Read(ipa);
             if (scenario == "install-error") throw new IOException("synthetic installer failure");
             if (scenario == "cleanup-blocked") BlockingHandle = new FileStream(ipa, FileMode.Open, FileAccess.Read, FileShare.None);
             return Task.CompletedTask;
@@ -328,6 +357,7 @@ internal static class WorkflowChecks
         public Task<bool> VerifyInstalledAsync(string bundle, string udid)
         {
             VerifyCalled = true;
+            VerifiedBundle = bundle;
             if (scenario == "verify-error") throw new IOException("synthetic verification failure");
             return Task.FromResult(scenario != "verify-missing");
         }

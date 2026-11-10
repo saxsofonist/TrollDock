@@ -26,10 +26,6 @@ public sealed class CertificateInstallWorkflow(ICertificateInstallTools? tools =
         progress.Report(new("Проверка сертификата", "Проверяю IPA, профиль и выбранный iPhone…", -1, true));
         material.CheckDevice(udid);
         var metadata = await Task.Run(() => IpaInspection.Read(originalIpa), token);
-        if (!material.AllowsBundleIdentifier(metadata.BundleIdentifier))
-            throw new IOException("Профиль не разрешает приложение " + metadata.BundleIdentifier + ". Выберите соответствующий или wildcard-профиль.");
-        foreach (var id in metadata.ExtensionIdentifiers)
-            if (!material.AllowsBundleIdentifier(id)) throw new IOException("Для расширения " + id + " нужен другой профиль. Эта версия подписывает IPA одним общим профилем.");
         await tools.VerifyToolsAsync(token);
         token.ThrowIfCancellationRequested();
         SigningWorkspace? workspace = null; bool installed = false; Exception? operationFailure = null; string? cleanupFailure = null;
@@ -49,7 +45,8 @@ public sealed class CertificateInstallWorkflow(ICertificateInstallTools? tools =
             }
             var files = material.WriteToDirectory(workspace.DirectoryPath);
             progress.Report(new("Подпись IPA", "Подписываю приложение выбранным сертификатом…", -1, true));
-            // The bundled signer resolves profile wildcards for each individual app/extension.
+            // The signer preserves IPA bundle IDs and derives signing entitlements from the
+            // profile. An explicit application-identifier need not equal CFBundleIdentifier.
             await tools.SignAsync(input, files.P12Path, files.ProfilePath, signed, workspace.DirectoryPath, log, token);
             var signedMetadata = await Task.Run(() => IpaInspection.Read(signed), token);
             if (signedMetadata.BundleIdentifier != metadata.BundleIdentifier || signedMetadata.Version != metadata.Version

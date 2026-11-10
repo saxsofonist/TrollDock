@@ -1,18 +1,20 @@
 TrollDock certificate tools and reproducible provenance
 =====================================================
 
-zsign 1.1.3-trolldock.1 is TrollDock's patched Windows x64 build, under MIT.
+zsign 1.1.3-trolldock.2 is TrollDock's patched Windows x64 build, under MIT.
 It is based on the official zhlynn/zsign v1.1.3 source at commit
 9299685bab7ef99827e06e5dfda93af747386590.
 https://github.com/zhlynn/zsign/releases/tag/v1.1.3
 
-The patch resolves application-identifier and permitted wildcard Keychain groups
-separately for each app and extension, preserving the profile's actual App ID
-prefix (which can differ from its Team ID). XML and DER entitlements use the same
-resolved dictionary. The original selected profile is embedded in each allowed
-app/extension before its resource seal is generated. An unpermitted nested bundle
-fails signing. See zsign-patch/ for the checked patch, complete build recipe,
-compiler provenance and upstream source-archive digest.
+The patch resolves application-identifier and wildcard Keychain groups separately
+for each app and extension, preserving their original CFBundleIdentifier and the
+profile's actual App ID prefix (which can differ from its Team ID). A difference
+between the profile's App ID and a bundle identifier does not block signing.
+XML and DER entitlements use the same resolved dictionary. The original selected
+profile is embedded in each app/extension before its resource seal is generated.
+Certificate/key, profile integrity and expiry, and device checks remain in
+TrollDock. See zsign-patch/ for the checked patch, complete build recipe, compiler
+provenance and upstream source-archive digest.
 
 Arguments: -f -k <temporary blank-password P12> -m <profile> -o <temporary IPA>
 -t <private job directory> -z 1 <private input copy>. No password argument.
