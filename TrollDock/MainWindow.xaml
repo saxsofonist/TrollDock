@@ -196,7 +196,7 @@
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <TextBlock Text="Выберите файл — остальное сделаем сами" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0" />
+                    <TextBlock Text="Выберите файлы — установим по очереди" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap" Margin="0,0,12,0" />
                     <TextBlock Grid.Column="1" x:Name="ConnectionMethodText" FontSize="11" FontWeight="SemiBold" Foreground="#6F819B">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
@@ -255,6 +255,43 @@
                         </StackPanel>
                         <Button Grid.Column="2" x:Name="ChooseIpaButton" Content="Выбрать IPA" Click="ChooseIpa_Click" VerticalAlignment="Center" Padding="18,10" AutomationProperties.Name="Выбрать файл IPA" />
                     </Grid>
+                </Border>
+
+                <Border x:Name="QueueCard" Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="16,12" Margin="0,0,0,16" Visibility="Collapsed">
+                    <StackPanel>
+                        <Grid Margin="0,0,0,7">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="QueueSummaryText" FontWeight="SemiBold" FontSize="13" />
+                            <Button Grid.Column="1" x:Name="ClearQueueButton" Content="Очистить" Click="ClearQueue_Click" Padding="10,4" MinHeight="28" FontSize="11" />
+                        </Grid>
+                        <ScrollViewer MaxHeight="180" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <ItemsControl x:Name="QueueItemsControl" AutomationProperties.Name="Очередь установки">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,3">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="27" /><ColumnDefinition Width="*" /><ColumnDefinition Width="100" /><ColumnDefinition Width="32" /></Grid.ColumnDefinitions>
+                                            <TextBlock Text="{Binding Number}" Foreground="#8390A4" FontSize="11" />
+                                            <TextBlock Grid.Column="1" Text="{Binding FileName}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Path}" Margin="0,0,10,0" FontSize="12" />
+                                            <TextBlock Grid.Column="2" Text="{Binding Status}" ToolTip="{Binding Detail}" FontSize="11">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="#67768D" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Установлено"><Setter Property="Foreground" Value="#21845C" /></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Ошибка"><Setter Property="Foreground" Value="#B34E43" /></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Выполняется"><Setter Property="Foreground" Value="#2165E8" /></DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <Button Grid.Column="3" Content="×" Tag="{Binding}" Click="RemoveQueueItem_Click" Padding="6,1" MinHeight="25" FontSize="15" ToolTip="Убрать из очереди" AutomationProperties.Name="Убрать файл из очереди" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </ScrollViewer>
+                        <TextBlock x:Name="QueueHintText" Text="При ошибке очередь остановится. Повтор запускает только незавершённые файлы." Foreground="#8390A4" FontSize="11" TextWrapping="Wrap" Margin="0,8,0,0" />
+                    </StackPanel>
                 </Border>
 
                 <Border x:Name="CertificateCard" Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17" Margin="0,0,0,16">
@@ -457,7 +494,7 @@
                     </StackPanel>
                 </Border>
 
-                <Border Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17">
+                <Border x:Name="InstallationStatusCard" Background="White" BorderBrush="#E2E8F0" BorderThickness="1" CornerRadius="14" Padding="20,17">
                     <StackPanel>
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -489,7 +526,7 @@
                 </Grid.ColumnDefinitions>
                 <StackPanel VerticalAlignment="Center" Margin="0,0,12,0">
                     <TextBlock Text="Без пересылки в облако" FontSize="12" FontWeight="SemiBold" Foreground="#52647E" />
-                    <TextBlock Text="Файл передаётся прямо на ваш iPhone" FontSize="11" Foreground="#8390A4" Margin="0,3,0,0" TextWrapping="Wrap" />
+                    <TextBlock Text="Файлы передаются прямо на ваш iPhone" FontSize="11" Foreground="#8390A4" Margin="0,3,0,0" TextWrapping="Wrap" />
                 </StackPanel>
                 <Button Grid.Column="1" x:Name="CancelButton" Content="Отмена" Click="Cancel_Click" IsEnabled="False" Margin="0,0,10,0" Padding="17,11" />
                 <Button Grid.Column="2" x:Name="InstallButton" Content="Установить на iPhone  →" Click="Install_Click" Style="{StaticResource PrimaryButton}" Padding="23,12" FontSize="14" MinWidth="225" IsDefault="True" />

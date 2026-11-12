@@ -14,6 +14,14 @@ Directory.CreateDirectory(bin);
 File.WriteAllText(Path.Combine(bin, "dpkg"), "#!/bin/sh\nprintf '%s\\n' \"${TD_DEVICE_ARCH:-iphoneos-arm64}\"\n");
 File.WriteAllText(Path.Combine(bin, "dpkg-query"), """
     #!/bin/sh
+    if [ "$4" = com.example.second ]; then
+        case "$3" in
+            '${Status}') printf '%s' "${TD_SECOND_STATUS:-install ok installed}" ;;
+            '${Version}') printf '%s' "${TD_SECOND_INSTALLED_VERSION:-2.0}" ;;
+            *) exit 2 ;;
+        esac
+        exit 0
+    fi
     case "$3" in
         '${Status}') printf '%s' "${TD_STATUS:-install ok installed}" ;;
         '${Version}') printf '%s' "${TD_VERSION:-1.2.3-4}" ;;
@@ -23,6 +31,15 @@ File.WriteAllText(Path.Combine(bin, "dpkg-query"), """
 File.WriteAllText(Path.Combine(bin, "dpkg-deb"), """
     #!/bin/sh
     [ "$1" = -f ] || exit 2
+    if [ "$2" = "${TD_SECOND_PATH:-}" ]; then
+        case "$3" in
+            Package) printf '%s\n' "${TD_SECOND_PACKAGE:-com.example.second}" ;;
+            Version) printf '%s\n' '2.0' ;;
+            Architecture) printf '%s\n' "${TD_SECOND_ARCH:-iphoneos-arm64}" ;;
+            *) exit 2 ;;
+        esac
+        exit 0
+    fi
     case "$3" in
         Package) printf '%s\n' "${TD_PACKAGE:-com.example.tweak}" ;;
         Version) printf '%s\n' '1.2.3-4' ;;
@@ -34,6 +51,15 @@ File.WriteAllText(Path.Combine(bin, "apt-get"), """
     #!/bin/sh
     if [ "$1" = --simulate ]; then
         printf '%s\n' "$@" > "$TD_SIM_LOG"
+        if [ "${TD_REQUIRE_PAIR:-0}" = 1 ]; then
+            FIRST_FOUND=0
+            SECOND_FOUND=0
+            for argument in "$@"; do
+                [ "$argument" != "$TD_FIRST_PATH" ] || FIRST_FOUND=1
+                [ "$argument" != "$TD_SECOND_PATH" ] || SECOND_FOUND=1
+            done
+            [ "$FIRST_FOUND$SECOND_FOUND" = 11 ] || exit 100
+        fi
         exit "${TD_SIM_EXIT:-0}"
     fi
     printf '%s\n' "$@" > "$TD_APT_LOG"
@@ -43,6 +69,9 @@ File.WriteAllText(Path.Combine(bin, "apt-get"), """
 var debLocal = Path.Combine(testRoot, "test' $(printf injected);`echo bad`.deb");
 File.WriteAllText(debLocal, "fake");
 var deb = unixRoot + "/" + Path.GetFileName(debLocal);
+var secondDebLocal = Path.Combine(testRoot, "second пакет $(echo literal).deb");
+File.WriteAllText(secondDebLocal, "fake");
+var secondDeb = unixRoot + "/" + Path.GetFileName(secondDebLocal);
 var aptLog = Path.Combine(testRoot, "apt-arguments.txt");
 if (File.Exists(aptLog)) File.Delete(aptLog);
 int checks = 0;
@@ -58,6 +87,8 @@ int checks = 0;
     start.ArgumentList.Add(scriptFile);
     start.Environment["TD_APT_LOG"] = unixRoot + "/apt-arguments.txt";
     start.Environment["TD_SIM_LOG"] = unixRoot + "/simulation-arguments.txt";
+    start.Environment["TD_FIRST_PATH"] = deb;
+    start.Environment["TD_SECOND_PATH"] = secondDeb;
     start.Environment["MSYS_NO_PATHCONV"] = "1";
     foreach (var (key, value) in environment) start.Environment[key] = value;
     using var process = Process.Start(start)!;
@@ -115,4 +146,51 @@ Check(rejected, "Relative install paths rejected");
 rejected = false;
 try { DebWorkflow.GetPreflightScript("/tmp/name\nnext.deb"); } catch (ArgumentException) { rejected = true; }
 Check(rejected, "Newline in remote path rejected");
+File.Delete(aptLog);
+result = Run(DebWorkflow.GetBatchPreflightScript([deb, secondDeb]), ("TD_REQUIRE_PAIR", "1"));
+Check(result.Code == 0 && result.Out.Contains("TROLLDOCK_PREFLIGHT:ready"), "Batch dependency simulation receives both local packages together");
+Check(!File.Exists(aptLog), "Batch preflight does not install packages");
+var simulationArgs = File.ReadAllLines(Path.Combine(testRoot, "simulation-arguments.txt"));
+Check(simulationArgs.Count(value => value == deb) == 1 && simulationArgs.Count(value => value == secondDeb) == 1,
+    "Batch simulation preserves Unicode and shell metacharacter paths as individual arguments");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_REQUIRE_PAIR", "1"), ("TD_SECOND_ARCH", "iphoneos-arm"));
+Check(result.Code != 0 && result.Err.Contains("ARCH_MISMATCH") && !File.Exists(aptLog), "Incompatible second package prevents the whole mutating transaction");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_SECOND_PACKAGE", "com.example.tweak"));
+Check(result.Code != 0 && result.Err.Contains("DUPLICATE_PACKAGE") && !File.Exists(aptLog), "Two versions of the same package are rejected before APT installation");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_SIM_EXIT", "100"));
+Check(result.Code == 100 && !File.Exists(aptLog), "Batch dependency failure prevents mutation");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_REQUIRE_PAIR", "1"));
+Check(result.Code == 0, "Both packages install in a successful shared transaction: " + result.Err);
+aptArgs = File.ReadAllLines(aptLog);
+Check(aptArgs.Count(value => value == deb) == 1 && aptArgs.Count(value => value == secondDeb) == 1 && aptArgs.Count(value => value == "install") == 1,
+    "One mutating APT call receives both local package paths");
+var batch = DebWorkflow.ParseBatchResult([debLocal, secondDebLocal], result.Code, result.Out, result.Err);
+Check(batch.Success && batch.Items.Count == 2 && batch.Items.All(item => item.Installed), "Batch reports success only after checking every package version and status");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_APT_EXIT", "100"), ("TD_SECOND_STATUS", "install ok half-configured"));
+batch = DebWorkflow.ParseBatchResult([debLocal, secondDebLocal], result.Code, result.Out, result.Err);
+Check(result.Code == 100 && !batch.Success && batch.Items[0].Installed && !batch.Items[1].Installed && batch.Error!.Contains("APT"),
+    "APT failure returns independently verified partial package results");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_SECOND_INSTALLED_VERSION", "1.0"));
+batch = DebWorkflow.ParseBatchResult([debLocal, secondDebLocal], result.Code, result.Out, result.Err);
+Check(result.Code != 0 && !batch.Success && batch.Items[0].Installed && !batch.Items[1].Installed,
+    "APT zero exit does not hide a wrong installed version in the second package");
+result = Run(DebWorkflow.GetBatchInstallScript([deb, secondDeb]), ("TD_APT_EXIT", "100"));
+batch = DebWorkflow.ParseBatchResult([debLocal, secondDebLocal], result.Code, result.Out, result.Err);
+Check(!batch.Success && batch.Items.All(item => item.Installed) && batch.Error != null,
+    "APT failure remains visible even when all selected versions are present");
+rejected = false;
+try { DebWorkflow.ParseBatchResult([debLocal, secondDebLocal], 0, "TROLLDOCK_BATCH_VERIFY_BEGIN\nTROLLDOCK_BATCH_ITEM:0:installed\nTROLLDOCK_BATCH_COMPLETE:0\n", ""); }
+catch (IOException) { rejected = true; }
+Check(rejected, "Incomplete per-package verification is never presented as success");
+rejected = false;
+try { DebWorkflow.ParseBatchResult([debLocal], 0, "TROLLDOCK_BATCH_VERIFY_BEGIN\nTROLLDOCK_BATCH_ITEM:0:installed\nTROLLDOCK_BATCH_ITEM:0:installed\nTROLLDOCK_BATCH_COMPLETE:0\n", ""); }
+catch (IOException) { rejected = true; }
+Check(rejected, "Duplicate per-package verification markers are rejected");
+rejected = false;
+try { DebWorkflow.GetBatchInstallScript([]); } catch (ArgumentException) { rejected = true; }
+Check(rejected, "Empty package batches rejected");
+rejected = false;
+try { DebWorkflow.GetBatchInstallScript([deb, deb]); } catch (ArgumentException) { rejected = true; }
+Check(rejected, "Repeated remote paths rejected");
+Check(File.ReadAllText(debLocal) == "fake" && File.ReadAllText(secondDebLocal) == "fake", "Local DEB source files remain unchanged");
 Console.WriteLine($"{checks} checks passed using fake tools only. No device contacted.");

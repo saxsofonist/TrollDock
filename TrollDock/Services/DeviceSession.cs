@@ -80,6 +80,122 @@ public sealed class DeviceSession : IAsyncDisposable
 
     public static void ValidateFile(string path, bool deb) => PackageFileValidator.Validate(path, deb);
 
+    public async Task<DebBatchInstallResult> InstallDebBatchAsync(IReadOnlyList<string> paths, IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (!Connected) throw new IOException("Нет подключения к телефону.");
+        if (paths.Count == 0) throw new ArgumentException("Выберите хотя бы один DEB-пакет.", nameof(paths));
+        var localPaths = paths.Select(Path.GetFullPath).ToArray();
+        if (localPaths.Distinct(StringComparer.OrdinalIgnoreCase).Count() != localPaths.Length)
+            throw new IOException("В очереди повторяется один и тот же DEB-файл.");
+        await Task.Run(() =>
+        {
+            foreach (var path in localPaths) { token.ThrowIfCancellationRequested(); ValidateFile(path, true); }
+        }, token);
+        var directory = "/var/mobile/Media/TrollDock-" + Guid.NewGuid().ToString("N");
+        var remotePaths = localPaths.Select((_, index) => directory + "/package-" + index + ".deb").ToArray();
+        bool created = false, installationStarted = false, installationCompleted = false;
+        var files = new List<FileStream>();
+        try
+        {
+            return await Task.Run(async () =>
+            {
+                token.ThrowIfCancellationRequested();
+                // Read handles remain open for the entire batch, preventing modification
+                // of source files while they are uploaded and checked.
+                foreach (var path in localPaths) files.Add(File.OpenRead(path));
+                var totalLength = files.Aggregate(0L, (sum, file) => checked(sum + file.Length));
+                progress.Report(new("Проверка DEB", $"Проверяю место для {files.Count} пакетов…", 0, true));
+                var space = Run("df -Pk /var/mobile/Media | tail -n 1", 20, token);
+                var columns = Regex.Split(space.Output.Trim(), @"\s+");
+                if (columns.Length >= 4 && long.TryParse(columns[3], out var availableKb) && availableKb < (totalLength * 2.0 + 100_000_000) / 1024)
+                    throw new IOException("На iPhone мало свободного места для передачи и распаковки выбранных пакетов.");
+                MustSucceed(Run("mkdir -m 755 " + Q(directory), 20, token));
+                created = true;
+                for (int index = 0; index < files.Count; index++)
+                {
+                    token.ThrowIfCancellationRequested();
+                    var detail = $"{index + 1}/{files.Count} · {Path.GetFileName(localPaths[index])}";
+                    await UploadAndVerifyAsync(files[index], remotePaths[index], detail, progress, token).ConfigureAwait(false);
+                }
+                token.ThrowIfCancellationRequested();
+                progress.Report(new("Проверка DEB", "Проверяю архитектуру всех пакетов и общие зависимости…", -1, true));
+                MustSucceed(Run(DebWorkflow.GetBatchPreflightScript(remotePaths), 300, token));
+                token.ThrowIfCancellationRequested();
+                progress.Report(new("Установка DEB", $"APT устанавливает {files.Count} пакетов одной операцией. Дождитесь завершения.", -1, false));
+                installationStarted = true;
+                // Cancellation must never interrupt an active dpkg/APT transaction.
+                var result = Run(DebWorkflow.GetBatchInstallScript(remotePaths), 3600);
+                installationCompleted = result.ExitCode >= 0;
+                var batch = DebWorkflow.ParseBatchResult(localPaths, result.ExitCode, result.Output, result.Error);
+                foreach (var item in batch.Items) log(Path.GetFileName(item.LocalPath) + ": " + item.Message);
+                if (batch.Error != null) log(batch.Error);
+                var installed = batch.Items.Count(item => item.Installed);
+                progress.Report(new(batch.Success ? "Установлено" : "Проверка завершена",
+                    $"Подтверждена установка: {installed} из {files.Count}. Respring можно выполнить отдельно.", 100, false));
+                return batch;
+            }, token);
+        }
+        finally
+        {
+            foreach (var file in files) file.Dispose();
+            if (created && installationStarted && !installationCompleted)
+                log("Результат установки DEB не получен. Временные файлы сохранены: " + directory + ". Проверьте состояние пакетов на iPhone перед повторной попыткой.");
+            else if (created && ssh?.IsConnected == true)
+                try
+                {
+                    await Task.Run(() => MustSucceed(Run("rm -f " + string.Join(" ", remotePaths.Select(Q)) + "; rmdir " + Q(directory), 30)));
+                }
+                catch (Exception ex) { log("Не удалось убрать временные DEB из " + directory + ": " + ex.Message); }
+            else if (created)
+                log("SSH-соединение потеряно: не удалось убрать временные DEB из " + directory + ".");
+        }
+    }
+
+    private async Task UploadAndVerifyAsync(FileStream file, string remote, string detail, IProgress<TransferProgress> progress, CancellationToken token)
+    {
+        var fileLength = file.Length;
+        progress.Report(new("Передача DEB", detail, 0, true));
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        long lastReport = -1000;
+        var progressGate = new object();
+        bool uploading = true;
+        var uploadProgress = new InlineProgress<UploadFileProgressReport>(report =>
+        {
+            lock (progressGate)
+            {
+                if (!uploading || token.IsCancellationRequested) return;
+                var bytes = report.TotalBytesUploaded;
+                if (watch.ElapsedMilliseconds - lastReport < 150 && bytes < (ulong)fileLength) return;
+                lastReport = watch.ElapsedMilliseconds;
+                var speed = bytes / Math.Max(watch.Elapsed.TotalSeconds, .1) / 1048576;
+                progress.Report(new("Передача DEB", $"{detail} · {bytes / 1048576.0:N1} / {fileLength / 1048576.0:N1} МБ · {speed:N1} МБ/с", 100.0 * bytes / fileLength, true));
+            }
+        });
+        try { await sftp!.UploadFileAsync(file, remote, uploadProgress, token).ConfigureAwait(false); }
+        catch (OperationCanceledException) { sftp?.Dispose(); sftp = null; throw; }
+        finally { lock (progressGate) uploading = false; }
+        token.ThrowIfCancellationRequested();
+        if (sftp.GetAttributes(remote).Size != fileLength) throw new IOException("Передан не весь DEB-файл. Повторите установку.");
+        MustSucceed(Run("chmod 644 " + Q(remote), 15, token));
+        progress.Report(new("Проверка передачи", detail + " · сверяю SHA-256…", -1, true));
+        file.Position = 0;
+        var localHash = Convert.ToHexString(await SHA256.HashDataAsync(file, token).ConfigureAwait(false)).ToLowerInvariant();
+        var hashResult = Run("PATH=/var/jb/usr/bin:/usr/bin:/bin:$PATH; if command -v sha256sum >/dev/null 2>&1; then sha256sum " + Q(remote) + "; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 " + Q(remote) + "; else exit 127; fi", 180, token);
+        if (hashResult.ExitCode == 127)
+        {
+            using var remoteStream = sftp.OpenRead(remote);
+            var actual = Convert.ToHexString(await SHA256.HashDataAsync(remoteStream, token).ConfigureAwait(false)).ToLowerInvariant();
+            if (actual != localHash) throw new IOException("Контрольная сумма DEB-файла на iPhone не совпала.");
+        }
+        else
+        {
+            MustSucceed(hashResult);
+            if (!hashResult.Output.TrimStart().StartsWith(localHash, StringComparison.OrdinalIgnoreCase)) throw new IOException("Контрольная сумма DEB-файла на iPhone не совпала.");
+        }
+        log(detail + " · SHA-256 совпадает: " + localHash);
+    }
+
     public async Task InstallAsync(string path, bool deb, IProgress<TransferProgress> progress, CancellationToken token)
     {
         if (!Connected) throw new IOException("Нет подключения к телефону.");

@@ -1,7 +1,7 @@
 param([switch]$IncludeTools)
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
-foreach ($project in @('TrollDock.Transport.Tests', 'TrollDock.AppTests', 'TrollDock.CertificateTests', 'TrollDock.WorkflowTests', 'DebWorkflowTests', 'TrollDock.UiTests')) {
+foreach ($project in @('TrollDock.Transport.Tests', 'TrollDock.AppTests', 'TrollDock.CertificateTests', 'TrollDock.WorkflowTests', 'DebWorkflowTests', 'TrollDock.BatchTests', 'TrollDock.UiTests')) {
     dotnet run --project (Join-Path $root $project)
     if ($LASTEXITCODE -ne 0) { throw "$project failed." }
 }

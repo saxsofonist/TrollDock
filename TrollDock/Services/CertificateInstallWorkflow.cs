@@ -78,7 +78,11 @@ public sealed class CertificateInstallWorkflow(ICertificateInstallTools? tools =
             }
         }
         if (cleanupFailure != null)
-            throw new IOException((installed ? "Приложение установлено, но " : "Операция не завершена; ") + "Windows не дал удалить временные файлы. Закройте программу, блокирующую папку, и перезапустите TrollDock для повторной очистки: " + cleanupFailure, operationFailure);
+        {
+            var message = (installed ? "Приложение установлено, но " : "Операция не завершена; ") + "Windows не дал удалить временные файлы. Закройте программу, блокирующую папку, и перезапустите TrollDock для повторной очистки: " + cleanupFailure;
+            if (installed) throw new InstallationCompletedException(message, operationFailure);
+            throw new IOException(message, operationFailure);
+        }
         if (operationFailure != null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(operationFailure).Throw();
         progress.Report(new("Установлено", finalDetail, 100, false));
     }

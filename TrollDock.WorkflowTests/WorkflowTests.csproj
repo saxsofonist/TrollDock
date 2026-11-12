@@ -6,6 +6,7 @@
     <Compile Include="../TrollDock/Services/SigningWorkspace.cs" Link="SigningWorkspace.cs" />
     <Compile Include="../TrollDock/Services/IpaInspection.cs" Link="IpaInspection.cs" />
     <Compile Include="../TrollDock/Services/CertificateInstallWorkflow.cs" Link="CertificateInstallWorkflow.cs" />
+    <Compile Include="../TrollDock/Services/InstallQueue.cs" Link="InstallQueue.cs" />
     <Compile Include="../TrollDock/Services/CertificateToolRunner.cs" Link="CertificateToolRunner.cs" />
     <Compile Include="../TrollDock/Services/AppSettings.cs" Link="AppSettings.cs" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />

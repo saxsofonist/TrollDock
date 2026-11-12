@@ -111,6 +111,7 @@ internal static class WorkflowChecks
                     try { await new CertificateInstallWorkflow(blocked, blockedStaging).InstallAsync(original, material, Udid, progress, _ => { }, cancellation.Token); }
                     catch (IOException e) { failure = e; }
                     Check(failure?.Message.Contains("не дал удалить") == true && !progress.Values.Any(v => v.Stage == "Установлено"), "locked output reports cleanup failure instead of unconditional success");
+                    Check(failure is InstallationCompletedException, "cleanup failure after confirmed install preserves completed status for batch retry");
                     Check(Directory.GetFiles(blockedStaging, ".trolldock-signing-job", SearchOption.AllDirectories).Length == 1, "failed cleanup preserves ownership marker for next startup");
                 }
                 finally { blocked.BlockingHandle?.Dispose(); }

@@ -16,13 +16,17 @@ public partial class MainWindow : Window
     private AppSettings settings = new();
     private DeviceSession? session;
     private CancellationTokenSource? operation;
-    private bool busy, installing, initialized;
-    private string? selectedFile;
+    private bool busy, installing, initialized, queueRunning, stopRequested;
+    private readonly Dictionary<string, InstallQueue> queues = new()
+    { ["trollstore"] = new(), ["certificate"] = new(), ["deb"] = new() };
     private string? certificatePath, provisionPath;
+    private string mode = "trollstore";
     private readonly CertificateVault certificateVault = new();
     private readonly bool preview = Environment.GetCommandLineArgs().Contains("--preview");
-    private bool IsDeb => DebModeRadioButton.IsChecked == true;
-    private bool IsCertificate => CertificateModeRadioButton.IsChecked == true;
+    private bool IsDeb => mode == "deb";
+    private bool IsCertificate => mode == "certificate";
+    private string CurrentMode => mode;
+    private InstallQueue CurrentQueue => queues[CurrentMode];
     public MainWindow()
     {
         InitializeComponent();
@@ -79,40 +83,69 @@ public partial class MainWindow : Window
     private async void RefreshDevices_Click(object sender, RoutedEventArgs e) => await RefreshDevicesAsync();
     private void ChooseIpa_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Filter = IsDeb ? "Пакет DEB (*.deb)|*.deb" : "Приложение IPA (*.ipa)|*.ipa", CheckFileExists = true, Multiselect = false };
-        if (dialog.ShowDialog(this) == true) SelectFile(dialog.FileName);
+        var dialog = new OpenFileDialog { Filter = IsDeb ? "Пакеты DEB (*.deb)|*.deb" : "Приложения IPA (*.ipa)|*.ipa", CheckFileExists = true, Multiselect = true };
+        if (dialog.ShowDialog(this) == true) SelectFiles(dialog.FileNames);
     }
-    private void SelectFile(string path)
+    private void SelectFiles(string[] paths)
     {
-        if (busy) return;
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (ext is not ".ipa" and not ".deb") { ShowError(new IOException("Выберите файл .ipa или .deb.")); return; }
-        if (ext == ".deb") DebModeRadioButton.IsChecked = true; else if (!IsCertificate) IpaModeRadioButton.IsChecked = true;
-        selectedFile = path; IpaNameText.Text = Path.GetFileName(path); IpaPathText.Text = path; IpaPathText.ToolTip = path;
-        try { IpaSizeText.Text = $"{new FileInfo(path).Length / 1048576.0:N1} МБ · {ext.TrimStart('.').ToUpperInvariant()}"; }
-        catch (Exception ex) { ShowError(ex); selectedFile = null; }
-        InstallButton.IsEnabled = selectedFile != null;
+        if (busy || paths.Length == 0) return;
+        try
+        {
+            var extensions = paths.Select(path => Path.GetExtension(path).ToLowerInvariant()).Distinct().ToArray();
+            if (extensions.Length != 1 || extensions[0] is not ".ipa" and not ".deb")
+                throw new IOException("Выберите несколько IPA или несколько DEB. Смешивать их в одной очереди нельзя.");
+            if (extensions[0] == ".deb") DebModeRadioButton.IsChecked = true; else if (!IsCertificate) IpaModeRadioButton.IsChecked = true;
+            var added = CurrentQueue.AddFiles(paths, extensions[0]);
+            UpdateQueueView();
+            StageText.Text = added > 0 ? "Файлы добавлены в очередь" : "Эти файлы уже в очереди";
+            DetailText.Text = "Можно добавить ещё файлы или запустить установку.";
+        }
+        catch (Exception ex) { ShowError(ex); }
     }
     private void Mode_Changed(object sender, RoutedEventArgs e)
     {
         if (!initialized) return;
-        selectedFile = null;
+        mode = sender is RadioButton selected ? selected == DebModeRadioButton ? "deb" : selected == CertificateModeRadioButton ? "certificate" : "trollstore"
+            : DebModeRadioButton.IsChecked == true ? "deb" : CertificateModeRadioButton.IsChecked == true ? "certificate" : "trollstore";
+        // Keep a single selected mode even when tabs have just been reordered/reparented.
+        foreach (var name in new[] { "trollstore", "certificate", "deb" }) ModeButton(name).IsChecked = name == mode;
         var type = IsDeb ? "DEB" : "IPA";
-        FileTypeText.Text = type; IpaNameText.Text = $"Перетащите сюда файл .{type.ToLowerInvariant()}";
-        IpaPathText.Text = "Или выберите его на компьютере"; IpaPathText.ToolTip = null; IpaSizeText.Text = "";
-        ChooseIpaButton.Content = "Выбрать " + type;
-        System.Windows.Automation.AutomationProperties.SetName(ChooseIpaButton, "Выбрать файл " + type);
+        FileTypeText.Text = type;
+        ChooseIpaButton.Content = "Добавить " + type;
+        System.Windows.Automation.AutomationProperties.SetName(ChooseIpaButton, "Добавить файлы " + type);
         StageText.Text = "Готовы к установке";
-        DetailText.Text = IsDeb ? "Выберите DEB. Программа проверит совместимость с Dopamine и установит пакет с зависимостями."
-            : IsCertificate ? "Выберите IPA, сертификат и профиль. Программа подпишет копию, установит её и удалит временные файлы без корзины."
-            : "Выберите IPA. Программа найдёт TrollStore и передаст файл на iPhone.";
-        InstallButton.Content = IsCertificate ? "Подписать и установить  →" : "Установить на iPhone  →";
-        InstallButton.IsEnabled = false; InstallProgressBar.Value = 0; TransferText.Text = "";
+        DetailText.Text = IsDeb ? "Выберите DEB. Пакеты и их зависимости установятся одной операцией APT."
+            : IsCertificate ? "Выберите IPA, сертификат и профиль. Копии подпишутся и установятся по очереди; временные файлы удалятся без корзины."
+            : "Выберите IPA. Программа найдёт TrollStore и установит приложения по очереди.";
+        InstallProgressBar.Value = 0; TransferText.Text = "";
+        QueueHintText.Text = IsDeb ? "DEB устанавливаются вместе: выбранные пакеты могут зависеть друг от друга. Повтор пропускает подтверждённые установки."
+            : "При ошибке очередь остановится. Повтор запускает только незавершённые файлы.";
+        UpdateQueueView();
     }
+    private void UpdateQueueView()
+    {
+        var queue = CurrentQueue;
+        var type = IsDeb ? "DEB" : "IPA";
+        QueueItemsControl.ItemsSource = queue.Items;
+        QueueCard.Visibility = queue.Items.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
+        QueueSummaryText.Text = $"Файлов: {queue.Items.Count} · установлено: {queue.Completed} · осталось: {queue.Remaining}";
+        IpaNameText.Text = queue.Items.Count == 0 ? $"Перетащите сюда файлы .{type.ToLowerInvariant()}" : $"В очереди: {queue.Items.Count} {type}";
+        IpaPathText.Text = queue.Items.Count == 0 ? "Или выберите несколько файлов на компьютере" : "Добавляйте файлы кнопкой или перетаскиванием";
+        IpaPathText.ToolTip = null;
+        IpaSizeText.Text = queue.Items.Count == 0 ? "" : $"{queue.Items.Sum(item => item.Length) / 1048576.0:N1} МБ всего";
+        ClearQueueButton.IsEnabled = !busy && queue.Items.Count > 0;
+        QueueItemsControl.IsEnabled = !busy;
+        InstallButton.IsEnabled = !busy && queue.Remaining > 0;
+        InstallButton.Content = queue.Completed > 0 && queue.Remaining > 0 ? $"Продолжить ({queue.Remaining})  →"
+            : IsCertificate ? "Подписать и установить  →" : "Установить на iPhone  →";
+    }
+    private void ClearQueue_Click(object sender, RoutedEventArgs e) { if (!busy) { CurrentQueue.Clear(); UpdateQueueView(); } }
+    private void RemoveQueueItem_Click(object sender, RoutedEventArgs e)
+    { if (!busy && sender is Button { Tag: InstallQueueItem item }) { CurrentQueue.Remove(item); UpdateQueueView(); } }
     private void Ipa_DragOver(object sender, DragEventArgs e) { e.Effects = !busy && e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None; e.Handled = true; }
     private void Ipa_Drop(object sender, DragEventArgs e)
     {
-        if (!busy && e.Data.GetData(DataFormats.FileDrop) is string[] files && files.Length == 1) SelectFile(files[0]);
+        if (!busy && e.Data.GetData(DataFormats.FileDrop) is string[] files) SelectFiles(files);
     }
     private void SetBusy(bool value)
     {
@@ -120,8 +153,9 @@ public partial class MainWindow : Window
         ChooseIpaButton.IsEnabled = RefreshButton.IsEnabled = ConnectButton.IsEnabled = DeviceComboBox.IsEnabled = !value;
         IpaModeRadioButton.IsEnabled = DebModeRadioButton.IsEnabled = CertificateModeRadioButton.IsEnabled = ConnectionSettingsExpander.IsEnabled = !value;
         HeaderSettingsButton.IsEnabled = CertificateCard.IsEnabled = !value;
-        InstallButton.IsEnabled = !value && selectedFile != null;
-        CancelButton.IsEnabled = value && !installing;
+        UpdateQueueView();
+        CancelButton.IsEnabled = value && !stopRequested && (queueRunning || !installing);
+        CancelButton.Content = queueRunning ? "Остановить" : "Отмена";
         RespringButton.IsEnabled = !value && session?.Connected == true;
         if (!value) InstallProgressBar.IsIndeterminate = false;
     }
@@ -144,26 +178,38 @@ public partial class MainWindow : Window
     }
     private async void Connect_Click(object sender, RoutedEventArgs e)
     {
-        if (busy) return; operation = new(); installing = false; SetBusy(true);
+        if (busy) return; operation = new(); installing = false; stopRequested = false; SetBusy(true);
         try { StageText.Text = "Проверка подключения"; DetailText.Text = "Подключаюсь и ищу TrollStore…"; await ConnectAsync(operation.Token); StageText.Text = "Связь проверена"; DetailText.Text = session!.TrollStorePath.Length > 0 ? "TrollStore найден. Можно устанавливать IPA и DEB." : "SSH работает. TrollStore не найден; доступна установка DEB."; }
         catch (Exception ex) { ShowError(ex); }
         finally { operation.Dispose(); operation = null; SetBusy(false); }
     }
     private async void Install_Click(object sender, RoutedEventArgs e)
     {
-        if (busy || selectedFile == null) return;
-        var file = selectedFile; var deb = IsDeb; var certificateMode = IsCertificate; operation = new(); installing = false; SetBusy(true);
+        if (busy || CurrentQueue.Remaining == 0) return;
+        var queue = CurrentQueue; var deb = IsDeb; var certificateMode = IsCertificate;
+        operation = new(); installing = false; stopRequested = false; queueRunning = true; SetBusy(true);
+        InstallationStatusCard.BringIntoView();
+        InstallQueueItem? activeItem = null;
         try
         {
             StageText.Text = "Подключение"; DetailText.Text = "Готовлю установку…";
-            var progress = new Progress<TransferProgress>(p =>
+            // Progress<T> posts asynchronously and can deliver a stale cancellable stage after
+            // mutation has started. Dispatch synchronously to keep the stop button truthful.
+            var progress = new SynchronousProgress<TransferProgress>(Dispatcher, p =>
             {
-                StageText.Text = p.Stage; DetailText.Text = p.Detail; installing = !p.CanCancel;
-                CancelButton.IsEnabled = p.CanCancel && busy;
+                StageText.Text = activeItem is null ? p.Stage : $"{activeItem.Number}/{queue.Items.Count} · {activeItem.FileName} · {p.Stage}";
+                DetailText.Text = stopRequested ? "Остановимся после текущей операции. " + p.Detail : p.Detail;
+                installing = !p.CanCancel;
+                CancelButton.IsEnabled = busy && !stopRequested;
+                CancelButton.Content = installing ? "После текущего" : "Остановить";
+                CancelButton.ToolTip = installing ? "Завершить текущую установку и не начинать следующие файлы" : "Отменить текущую подготовку и остановить очередь";
                 InstallProgressBar.IsIndeterminate = p.Percent < 0;
                 if (p.Percent >= 0) InstallProgressBar.Value = p.Percent;
-                TransferText.Text = p.Percent is >= 0 and < 100 ? $"{p.Percent:N0}%" : "";
+                TransferText.Text = $"{queue.Completed}/{queue.Items.Count}" + (p.Percent is >= 0 and < 100 ? $" · {p.Percent:N0}%" : "");
+                QueueSummaryText.Text = $"Файлов: {queue.Items.Count} · установлено: {queue.Completed} · осталось: {queue.Remaining}";
+                if (p.Stage == "Установлено") AddLog(p.Detail);
             });
+            InstallQueueRunResult result;
             if (certificateMode)
             {
                 if (DeviceComboBox.SelectedItem is not UsbDevice) await RefreshDevicesAsync();
@@ -176,20 +222,67 @@ public partial class MainWindow : Window
                 }
                 settings.LastSerial = device.SerialNumber; settings.Save();
                 ConnectionStatusText.Text = "iPhone выбран · USB";
-                await new CertificateInstallWorkflow().InstallAsync(file, material, device.SerialNumber, progress, AddLog, operation.Token);
+                var workflow = new CertificateInstallWorkflow();
+                result = await queue.RunAsync(async item =>
+                {
+                    activeItem = item; AddLog($"[{item.Number}/{queue.Items.Count}] {item.FileName}");
+                    await workflow.InstallAsync(item.Path, material, device.SerialNumber, progress, AddLog, operation.Token);
+                    AddLog("Установлено: " + item.FileName);
+                }, () => stopRequested, operation.Token);
             }
             else
             {
-                // Reconnect so device selection and edited credentials always take effect.
+                // One connection for the entire queue; capture the selected device and credentials.
                 await ConnectAsync(operation.Token);
-                await session!.InstallAsync(file, deb, progress, operation.Token);
+                if (deb)
+                {
+                    result = await queue.RunBatchAsync(async items =>
+                    {
+                        var batch = await session!.InstallDebBatchAsync(items.Select(item => item.Path).ToArray(), progress, operation.Token);
+                        return new InstallQueueBatchOutcome(batch.Items.Select(item => new InstallQueueOutcome(item.LocalPath, item.Installed, item.Message)).ToArray(), batch.Error);
+                    }, () => stopRequested, operation.Token);
+                }
+                else result = await queue.RunAsync(async item =>
+                {
+                    activeItem = item; AddLog($"[{item.Number}/{queue.Items.Count}] {item.FileName}");
+                    await session!.InstallAsync(item.Path, false, progress, operation.Token);
+                    AddLog("Установлено: " + item.FileName);
+                }, () => stopRequested, operation.Token);
+            }
+            if (result.Error is not null) { ShowError(result.Error); AddLog("Очередь остановлена. Подтверждённые установки при повторе будут пропущены."); }
+            else if (result.Stopped && queue.Remaining > 0)
+            {
+                StageText.Text = "Очередь остановлена";
+                DetailText.Text = $"Установлено: {queue.Completed} из {queue.Items.Count}. Незавершённые файлы остались в очереди; можно продолжить.";
+                AddLog(DetailText.Text);
+            }
+            else
+            {
+                StageText.Text = $"Установлено: {queue.Completed} из {queue.Items.Count}";
+                DetailText.Text = deb ? "Пакеты установлены. Для твиков при необходимости перезапустите интерфейс iPhone."
+                    : certificateMode ? "Приложения установлены. Временные подписанные IPA удалены без корзины; исходные файлы сохранены." : "Приложения установлены через TrollStore.";
+                InstallProgressBar.Value = 100; AddLog(StageText.Text);
             }
         }
-        catch (OperationCanceledException) { StageText.Text = "Отменено"; DetailText.Text = "Передача или проверка отменена. Установка не началась."; AddLog("Операция отменена."); if (session?.Connected != true) ConnectionStatusText.Text = "Соединение закрыто"; }
+        catch (OperationCanceledException) { StageText.Text = "Очередь остановлена"; DetailText.Text = $"Подтверждено установок: {queue.Completed}. Остальные файлы остались в очереди."; AddLog("Операция отменена."); if (session?.Connected != true && !certificateMode) ConnectionStatusText.Text = "Соединение закрыто"; }
         catch (Exception ex) { ShowError(ex); }
-        finally { installing = false; operation.Dispose(); operation = null; SetBusy(false); }
+        finally { installing = false; queueRunning = false; stopRequested = false; operation.Dispose(); operation = null; SetBusy(false); TransferText.Text = $"{queue.Completed}/{queue.Items.Count}"; }
     }
-    private void Cancel_Click(object sender, RoutedEventArgs e) { if (!installing) { operation?.Cancel(); CancelButton.IsEnabled = false; DetailText.Text = "Отмена… Дождитесь завершения текущей проверки."; } }
+    private void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        if (!busy) return;
+        if (queueRunning) stopRequested = true;
+        if (!installing) operation?.Cancel();
+        CancelButton.IsEnabled = false;
+        DetailText.Text = installing ? "Текущая установка завершится. Следующие файлы запускаться не будут." : "Останавливаю подготовку. Дождитесь очистки временных файлов.";
+    }
+    private sealed class SynchronousProgress<T>(System.Windows.Threading.Dispatcher dispatcher, Action<T> report) : IProgress<T>
+    {
+        public void Report(T value)
+        {
+            if (dispatcher.CheckAccess()) report(value); else dispatcher.Invoke(() => report(value));
+        }
+    }
     private async void Respring_Click(object sender, RoutedEventArgs e)
     {
         if (busy || session?.Connected != true) return;
@@ -215,12 +308,22 @@ public partial class MainWindow : Window
     {
         await Task.Delay(250);
         if (Environment.GetCommandLineArgs().Contains("--certificate")) CertificateModeRadioButton.IsChecked = true;
+        if (Environment.GetCommandLineArgs().Contains("--batch"))
+        {
+            var extension = IsDeb ? ".deb" : ".ipa";
+            foreach (var name in new[] { "Музыкальный плеер", "Приложение для заметок", "Карта путешествий" })
+                CurrentQueue.Items.Add(new InstallQueueItem("C:\\Apps\\" + name + extension, 48_000_000) { Number = CurrentQueue.Items.Count + 1 });
+            CurrentQueue.Items[0].SetState(InstallQueueState.Succeeded);
+            CurrentQueue.Items[1].SetState(InstallQueueState.Failed, "Демонстрация состояния очереди");
+            UpdateQueueView();
+        }
         ConnectionStatusText.Text = "iPhone найден · USB";
         DeviceComboBox.ItemsSource = new[] { new UsbDevice(1, "preview", "iPhone · USB") }; DeviceComboBox.SelectedIndex = 0;
         UpdateLayout();
         Window rendered = this;
         if (Environment.GetCommandLineArgs().Contains("--settings")) { rendered = new SettingsWindow(settings) { Owner = this, Resources = Resources }; rendered.Show(); rendered.UpdateLayout(); }
-        var image = new RenderTargetBitmap((int)rendered.ActualWidth, (int)rendered.ActualHeight, 96, 96, PixelFormats.Pbgra32); image.Render(rendered);
+        var visual = rendered.Content as FrameworkElement ?? rendered;
+        var image = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32); image.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
         var args = Environment.GetCommandLineArgs(); var index = Array.IndexOf(args, "--preview");
         using (var output = File.Create(args[index + 1])) encoder.Save(output);

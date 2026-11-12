@@ -1,10 +1,128 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
 
 namespace TrollDock.Services;
 
 /// <summary>Builds POSIX sh scripts for the package tools already installed by the jailbreak.</summary>
+public sealed record DebBatchItemResult(string LocalPath, bool Installed, string Message);
+public sealed record DebBatchInstallResult(IReadOnlyList<DebBatchItemResult> Items, string? Error)
+{
+    public bool Success => Error == null && Items.Count > 0 && Items.All(item => item.Installed);
+}
+
 public static class DebWorkflow
 {
+    public static string GetBatchPreflightScript(IReadOnlyList<string> remoteDebPaths)
+    {
+        ValidateBatch(remoteDebPaths);
+        var script = new StringBuilder(CommonScript).Append('\n').Append(ToolSetupScript).Append("\nSEEN_PACKAGES='|'\n");
+        for (int index = 0; index < remoteDebPaths.Count; index++)
+        {
+            script.Append("DEB=").Append(Quote(remoteDebPaths[index])).Append('\n')
+                .Append("printf '%s\\n' 'TROLLDOCK_BATCH_CHECK:").Append(index).Append("'\n")
+                .Append(PackageMetadataScript).Append('\n');
+            script.Append("case \"$SEEN_PACKAGES\" in *\"|$PACKAGE|\"*) fail DUPLICATE_PACKAGE 'В очереди несколько DEB одного пакета. Оставьте одну нужную версию.' ;; esac\n")
+                .Append("SEEN_PACKAGES=$SEEN_PACKAGES$PACKAGE'|'\n");
+            script.Append("PACKAGE_").Append(index).Append("=$PACKAGE\nVERSION_").Append(index).Append("=$VERSION\n");
+        }
+        // POSIX sh positional arguments preserve every path as a distinct literal argument.
+        script.Append("set --");
+        foreach (var path in remoteDebPaths) script.Append(' ').Append(Quote(path));
+        script.Append('\n').Append(DependencyCheckScript.Replace("install \"$DEB\"", "install \"$@\"", StringComparison.Ordinal)).Append('\n');
+        return script.ToString();
+    }
+
+    public static string GetBatchInstallScript(IReadOnlyList<string> remoteDebPaths)
+    {
+        var script = new StringBuilder(GetBatchPreflightScript(remoteDebPaths)).Append("""
+            printf '%s\n' 'TROLLDOCK_STAGE:installing'
+            APT_RESULT=0
+            "$APT" --assume-yes --no-remove \
+                -o Dpkg::Use-Pty=0 \
+                -o Dpkg::Options::=--force-confold \
+                install "$@" </dev/null || APT_RESULT=$?
+            VERIFY_RESULT=0
+            printf '%s\n' 'TROLLDOCK_BATCH_VERIFY_BEGIN'
+            """).Append('\n');
+        for (int index = 0; index < remoteDebPaths.Count; index++)
+        {
+            script.Append("PACKAGE=$PACKAGE_").Append(index).Append("\nVERSION=$VERSION_").Append(index).Append('\n')
+                .Append("""
+                    ITEM_RESULT=not_installed
+                    INSTALLED_STATUS=$("$DPKG_QUERY" -W -f '${Status}' "$PACKAGE" 2>/dev/null) || INSTALLED_STATUS=''
+                    INSTALLED_VERSION=$("$DPKG_QUERY" -W -f '${Version}' "$PACKAGE" 2>/dev/null) || INSTALLED_VERSION=''
+                    if [ "$INSTALLED_STATUS" = 'install ok installed' ] && [ "$INSTALLED_VERSION" = "$VERSION" ]; then
+                        ITEM_RESULT=installed
+                    else
+                        VERIFY_RESULT=1
+                    fi
+                    """).Append('\n')
+                .Append("printf 'TROLLDOCK_BATCH_ITEM:").Append(index).Append(":%s\\n' \"$ITEM_RESULT\"\n");
+        }
+        script.Append("""
+            printf 'TROLLDOCK_BATCH_COMPLETE:%s\n' "$APT_RESULT"
+            if [ "$APT_RESULT" != 0 ]; then
+                printf 'TROLLDOCK_ERROR:APT_FAILED|APT завершился с кодом %s. Установка части пакетов могла завершиться; результат каждого проверен отдельно. Подробности — выше.\n' "$APT_RESULT" >&2
+                exit "$APT_RESULT"
+            fi
+            [ "$VERIFY_RESULT" = 0 ] || fail VERIFY_FAILED 'Не для всех пакетов подтверждены нужная версия и состояние install ok installed. Проверьте результаты очереди и Sileo или Zebra.'
+            printf '%s\n' 'TROLLDOCK_RESULT:installed'
+            """).Append('\n');
+        return script.ToString();
+    }
+
+    public static DebBatchInstallResult ParseBatchResult(IReadOnlyList<string> localPaths, int exitCode, string output, string error)
+    {
+        ArgumentNullException.ThrowIfNull(localPaths);
+        if (localPaths.Count == 0) throw new ArgumentException("Пустой список результатов DEB.", nameof(localPaths));
+        var lines = output.Replace("\r\n", "\n", StringComparison.Ordinal).Split('\n');
+        var start = Array.FindLastIndex(lines, line => line == "TROLLDOCK_BATCH_VERIFY_BEGIN");
+        var items = new Dictionary<int, bool>();
+        bool complete = false;
+        if (start >= 0)
+        {
+            foreach (var line in lines.Skip(start + 1))
+            {
+                if (line.StartsWith("TROLLDOCK_BATCH_COMPLETE:", StringComparison.Ordinal))
+                {
+                    if (!int.TryParse(line["TROLLDOCK_BATCH_COMPLETE:".Length..], out var aptResult) || aptResult < 0 || (aptResult != 0 && exitCode == 0))
+                        throw new IOException("Получен противоречивый результат APT. Проверьте пакеты в Sileo или Zebra.");
+                    complete = true;
+                    break;
+                }
+                if (!line.StartsWith("TROLLDOCK_BATCH_ITEM:", StringComparison.Ordinal)) continue;
+                var fields = line.Split(':');
+                if (fields.Length != 3 || !int.TryParse(fields[1], out var index) || index < 0 || index >= localPaths.Count ||
+                    fields[2] is not ("installed" or "not_installed") || !items.TryAdd(index, fields[2] == "installed"))
+                    throw new IOException("Получен неоднозначный результат проверки DEB. Проверьте пакеты в Sileo или Zebra.");
+            }
+        }
+        if (!complete || items.Count != localPaths.Count)
+            throw new IOException("Результат установки DEB получен не полностью. Проверьте пакеты на iPhone перед повторной попыткой.");
+        var results = localPaths.Select((path, index) => new DebBatchItemResult(path, items[index], items[index]
+            ? "Нужная версия установлена и проверена."
+            : "Установка нужной версии не подтверждена. Проверьте пакет в Sileo или Zebra.")).ToArray();
+        string? failure = null;
+        if (exitCode != 0 || results.Any(item => !item.Installed))
+        {
+            var message = (error + "\n" + output).Split('\n').LastOrDefault(line => line.StartsWith("TROLLDOCK_ERROR:", StringComparison.Ordinal) && line.Contains('|'));
+            failure = message == null ? $"APT или проверка пакетов завершились с кодом {exitCode}. Подробности — в журнале." : message[(message.IndexOf('|') + 1)..].TrimEnd('\r');
+        }
+        return new(results, failure);
+    }
+
+    private static void ValidateBatch(IReadOnlyList<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        if (paths.Count == 0) throw new ArgumentException("Выберите хотя бы один DEB-пакет.", nameof(paths));
+        foreach (var path in paths) ValidatePath(path);
+        if (paths.Distinct(StringComparer.Ordinal).Count() != paths.Count)
+            throw new ArgumentException("В списке повторяется путь к DEB-пакету.", nameof(paths));
+    }
+
     public static string GetPreflightScript(string remoteDebPath)
     {
         ValidatePath(remoteDebPath);
@@ -100,9 +218,10 @@ public static class DebWorkflow
         }
         """;
 
-    private const string PreflightScript = """
+    private const string PreflightScript = ToolSetupScript + "\n" + PackageMetadataScript + "\n" + DependencyCheckScript;
+
+    private const string ToolSetupScript = """
         require_root
-        [ -f "$DEB" ] && [ -r "$DEB" ] || fail DEB_NOT_FOUND 'Загруженный DEB не найден или недоступен для чтения.'
         DPKG=$(find_tool dpkg) || fail DPKG_MISSING 'dpkg не найден. Проверьте, что jailbreak Dopamine активен и bootstrap установлен.'
         DPKG_DEB=$(find_tool dpkg-deb) || fail DPKG_DEB_MISSING 'dpkg-deb не найден. Восстановите пакет dpkg через Sileo или Zebra.'
         DPKG_QUERY=$(find_tool dpkg-query) || fail DPKG_QUERY_MISSING 'dpkg-query не найден. Восстановите пакет dpkg через Sileo или Zebra.'
@@ -121,6 +240,10 @@ public static class DebWorkflow
                 done
                 ;;
         esac
+        """;
+
+    private const string PackageMetadataScript = """
+        [ -f "$DEB" ] && [ -r "$DEB" ] || fail DEB_NOT_FOUND 'Загруженный DEB не найден или недоступен для чтения.'
         PACKAGE=$("$DPKG_DEB" -f "$DEB" Package) || fail INVALID_DEB 'Не удалось прочитать Package из DEB. Файл повреждён или имеет неподдерживаемый формат.'
         VERSION=$("$DPKG_DEB" -f "$DEB" Version) || fail INVALID_DEB 'Не удалось прочитать Version из DEB.'
         ARCH=$("$DPKG_DEB" -f "$DEB" Architecture) || fail INVALID_DEB 'Не удалось прочитать Architecture из DEB.'
@@ -142,6 +265,9 @@ public static class DebWorkflow
             printf 'TROLLDOCK_ERROR:ARCH_MISMATCH|Архитектура DEB (%s) не совпадает с архитектурой jailbreak (%s). Нужна совместимая версия пакета.\n' "$ARCH" "$DEVICE_ARCH" >&2
             exit 1
         fi
+        """;
+
+    private const string DependencyCheckScript = """
         printf '%s\n' 'TROLLDOCK_STAGE:checking_dependencies'
         if "$APT" --simulate --assume-yes --no-remove \
             -o Dpkg::Use-Pty=0 \
