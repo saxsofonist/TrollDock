@@ -13,7 +13,7 @@ namespace TrollDock.Services;
 public sealed record RootPasswordProgress(string Stage, string Detail, bool CanCancel);
 public sealed record RootPasswordResult(bool Verified, bool PasswordChanged, string Message, bool MayHaveChanged = false);
 
-/// <summary>Runs the system passwd utility over SSH stdin, then verifies a fresh root login.
+/// <summary>Runs the bootstrap pw utility over SSH stdin, then verifies a fresh root login.
 /// No secret is interpolated into a command, written to disk, or included in diagnostics.</summary>
 public sealed class RootPasswordService
 {
@@ -115,15 +115,20 @@ public sealed class RootPasswordService
     internal static string BuildCommand(string marker)
     {
         if (!Regex.IsMatch(marker, "^__TROLLDOCK_[a-f0-9]{32}_$")) throw new ArgumentException("Invalid protocol marker.");
-        // SSH exec does not start an interactive login shell, avoiding zsh first-run menus.
-        // Procursus passwd uses OpenPAM's stdin fallback when no controlling terminal exists.
-        var privileged = "PATH=/var/jb/usr/bin:/var/jb/bin:/usr/bin:/bin; export PATH; LC_ALL=C; export LC_ALL; "
-            + "[ \"$(id -u)\" = 0 ] || exit 71; "
-            + "if [ -x /var/jb/usr/bin/passwd ]; then P=/var/jb/usr/bin/passwd; elif [ -x /usr/bin/passwd ]; then P=/usr/bin/passwd; else exit 72; fi; "
-            + "printf '%s\\n' '" + marker + "READY__'; exec \"$P\" root";
-        return "if [ -x /var/jb/bin/sh ]; then S=/var/jb/bin/sh; else S=/bin/sh; fi; "
-            + "if [ -x /var/jb/usr/bin/sudo ]; then U=/var/jb/usr/bin/sudo; elif [ -x /usr/bin/sudo ]; then U=/usr/bin/sudo; else exit 73; fi; "
-            + "LC_ALL=C; export LC_ALL; exec \"$U\" -S -k -p '" + marker + "SUDO_%p__' -- \"$S\" -c " + Quote(privileged);
+        // Dopamine uses bootstrap pw usermod -h 0 to set passwords without PAM's old-password
+        // conversation. Keep rootless helpers together: never change the rootful database
+        // merely because a rootless helper is absent. SSH exec also avoids zsh first-run menus.
+        var privileged = "PATH=/var/jb/usr/sbin:/var/jb/usr/bin:/var/jb/sbin:/var/jb/bin:/usr/sbin:/usr/bin:/sbin:/bin; export PATH; LC_ALL=C; export LC_ALL; "
+            + "if [ \"$(id -u)\" != 0 ] || [ \"$(id -ru)\" != 0 ]; then printf '%s\\n' '" + marker + "NOT_ROOT__'; exit 71; fi; "
+            + "if [ -d /var/jb ]; then P=/var/jb/usr/sbin/pw; else P=/usr/sbin/pw; fi; "
+            + "if [ ! -x \"$P\" ]; then printf '%s\\n' '" + marker + "NO_PW__'; exit 72; fi; "
+            + "printf '%s\\n' '" + marker + "READY_PW__'; "
+            // pw reads its input with one read(). Buffer a complete SSH line before feeding
+            // the short password through a local pipe; shell read -r preserves literal bytes.
+            + "IFS= read -r NEW_ROOT || exit 74; printf '%s\\n' \"$NEW_ROOT\" | \"$P\" usermod root -h 0; RESULT=$?; unset NEW_ROOT; exit \"$RESULT\"";
+        return "if [ -d /var/jb ]; then S=/var/jb/bin/sh; U=/var/jb/usr/bin/sudo; else S=/bin/sh; U=/usr/bin/sudo; fi; "
+            + "[ -x \"$S\" ] && [ -x \"$U\" ] || exit 73; "
+            + "LC_ALL=C; export LC_ALL; exec \"$U\" -S -k -u root -p '" + marker + "SUDO_%p__' -- \"$S\" -c " + Quote(privileged);
     }
     private static string Quote(string value) => "'" + value.Replace("'", "'\"'\"'") + "'";
     private static async Task<IRootPasswordSsh> ConnectSshAsync(string host, int port, string username, string password, Action<byte[]> trust, CancellationToken token)
@@ -209,20 +214,19 @@ internal static class RootPasswordConversation
         }
         var pumps = Task.WhenAll(Task.Run(() => Pump(channel.Output, 0)), Task.Run(() => Pump(channel.Error, 1)));
         _ = pumps.ContinueWith(task => messages.Writer.TryComplete(task.Exception), TaskScheduler.Default);
-        string[] pending = ["", ""]; bool ready = false, sudoSent = false; int newPasswordCount = 0;
-        var prompt = new Regex(@"(?:retype|repeat|confirm)\s+(?:the\s+)?(?:new\s+)?password\s*:|new\s+password\s*:|(?:old|current)(?:\s+unix)?\s+password\s*:", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        string[] pending = ["", ""]; bool ready = false, sudoSent = false;
         try
         {
             for (;;)
             {
-                if (newPasswordCount == 0) token.ThrowIfCancellationRequested();
-                using var readToken = newPasswordCount == 0 ? CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token) : CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
+                if (!ready) token.ThrowIfCancellationRequested();
+                using var readToken = !ready ? CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token) : CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                 if (!await messages.Reader.WaitToReadAsync(readToken.Token)) break;
                 while (messages.Reader.TryRead(out var message))
                 {
                     pending[message.Source] += message.Text;
-                    var sudo = Regex.Match(pending[message.Source], Regex.Escape(marker) + "SUDO_([^_\\r\\n]+)__");
-                    if (sudo.Success)
+                    Match sudo;
+                    while ((sudo = Regex.Match(pending[message.Source], Regex.Escape(marker) + "SUDO_([^_\\r\\n]+)__")).Success)
                     {
                         if (ready || sudoSent || sudo.Groups[1].Value != "mobile")
                             throw new RootPasswordProtocolException("sudo не принял пароль mobile или требует пароль другой учётной записи. Настройка остановлена.");
@@ -230,41 +234,29 @@ internal static class RootPasswordConversation
                         await WriteSecretAsync(channel.Input, mobilePassword, readToken.Token);
                         pending[message.Source] = pending[message.Source].Remove(sudo.Index, sudo.Length);
                     }
-                    var readyAt = pending[message.Source].IndexOf(marker + "READY__", StringComparison.Ordinal);
-                    if (readyAt >= 0)
+                    if (pending[message.Source].Contains(marker + "NO_PW__", StringComparison.Ordinal))
+                        throw new RootPasswordProtocolException("В bootstrap jailbreak не найдена утилита pw. Проверьте пакет system-cmds в Sileo или Zebra; новый пароль root не передавался.");
+                    if (pending[message.Source].Contains(marker + "NOT_ROOT__", StringComparison.Ordinal))
+                        throw new RootPasswordProtocolException("sudo не подтвердил полный доступ root. Проверьте права mobile; новый пароль root не передавался.");
+                    int readyAt;
+                    while ((readyAt = pending[message.Source].IndexOf(marker + "READY_PW__", StringComparison.Ordinal)) >= 0)
                     {
+                        if (ready) throw new RootPasswordProtocolException("Утилита повторно запросила пароль. Автоматическая повторная смена остановлена; проверьте вход с новым паролем.");
+                        token.ThrowIfCancellationRequested();
                         ready = true;
-                        pending[message.Source] = pending[message.Source].Remove(readyAt, marker.Length + "READY__".Length);
-                    }
-                    // stdout and stderr readers can deliver out of order. Keep each byte stream
-                    // separate and retain early prompts until the privileged READY marker arrives.
-                    if (!ready) continue;
-                    for (var source = 0; source < pending.Length; source++)
-                    {
-                      Match match;
-                      while ((match = prompt.Match(pending[source])).Success)
-                      {
-                        var value = match.Value.ToLowerInvariant();
-                        if (value.StartsWith("old") || value.StartsWith("current"))
-                            throw new RootPasswordProtocolException("Системная утилита требует текущий пароль root. Эта операция предназначена для настройки через sudo; выполните смену вручную или проверьте права mobile.");
-                        var confirmation = value.StartsWith("retype") || value.StartsWith("repeat") || value.StartsWith("confirm");
-                        if (newPasswordCount != (confirmation ? 1 : 0))
-                            throw new RootPasswordProtocolException("Утилита не приняла новый пароль или запросила его повторно. Проверьте требования к паролю.");
-                        if (newPasswordCount == 0) { token.ThrowIfCancellationRequested(); mutationStarting(); }
-                        newPasswordCount++;
+                        mutationStarting();
                         await WriteSecretAsync(channel.Input, newRootPassword, lifetime.Token);
-                        pending[source] = pending[source][(match.Index + match.Length)..];
-                      }
+                        pending[message.Source] = pending[message.Source].Remove(readyAt, marker.Length + "READY_PW__".Length);
                     }
                 }
             }
             await channel.Completion.WaitAsync(lifetime.Token);
-            if (!ready || newPasswordCount != 2 || channel.ExitCode != 0)
+            if (!ready || channel.ExitCode != 0)
                 throw new RootPasswordProtocolException(!ready
-                    ? "sudo не разрешил смену пароля либо системная утилита passwd недоступна. Проверьте права mobile и bootstrap jailbreak."
-                    : "Утилита не подтвердила полный обмен паролем. Проверьте вход с новым паролем.");
-            // Apple's passwd main can exit 0 even after a PAM error. A complete exchange is
-            // not proof of mutation; only a new root SSH authentication + UID 0 confirms it.
+                    ? "sudo не разрешил смену пароля либо утилиты bootstrap недоступны. Проверьте права mobile и активность jailbreak."
+                    : "Утилита pw не подтвердила смену пароля. Проверьте вход с новым паролем.");
+            // Exit status alone is not proof of a usable password. Only a new root SSH
+            // authentication followed by UID 0 confirms the result.
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         { throw new RootPasswordProtocolException("Время ожидания ответа утилиты истекло. Проверьте состояние SSH."); }

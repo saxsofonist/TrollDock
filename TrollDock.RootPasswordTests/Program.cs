@@ -28,14 +28,15 @@ static class Tests
         var stage = mode == "nopasswd" ? 1 : 0;
         void Ready()
         {
-            if (mode == "old") c.Stdout.Push(marker + "READY__\nOld Password: ");
+            if (mode == "missing") { c.Stdout.Push(marker + "NO_PW__\n"); c.End(72); }
+            else if (mode == "notroot") { c.Stdout.Push(marker + "NOT_ROOT__\n"); c.End(71); }
+            else if (mode == "old") { c.Stdout.Push(marker + "READY__\nOld Password: "); c.End(1); }
             else if (mode == "reversed")
             {
-                c.Stderr.Push("New Password: ");
-                _ = Task.Run(async () => { await Task.Delay(50); c.Stdout.Push(marker + "READY__\n"); });
+                c.Stderr.Push("bootstrap diagnostic before readiness\n");
+                _ = Task.Run(async () => { await Task.Delay(50); c.Stdout.Push(marker + "READY_PW__\n"); });
             }
-            else c.Stdout.Push(marker + "READY__\nChanging password for root.\nNew Pass");
-            if (mode != "old" && mode != "reversed") c.Stdout.Push("word: ");
+            else { c.Stdout.Push(marker[..19]); c.Stdout.Push(marker[19..] + "READY_PW__\n"); }
         }
         c.OnInput = value =>
         {
@@ -48,16 +49,12 @@ static class Tests
             else if (stage == 2)
             {
                 Check(value == Root + "\n", "new password missing"); onFirstNew?.Invoke();
-                if (mode == "reject") c.Stdout.Push("Password is not acceptable.\nNew Password: ");
-                else if (mode == "lostack") c.End(1);
-                else { c.Stdout.Push("Retype New "); c.Stdout.Push("Password: "); }
+                if (mode == "writefailed") throw new IOException("synthetic partial stdin failure " + value);
+                if (mode == "reject") c.Stderr.Push("pw: update failed\n");
+                if (mode == "duplicate") c.Stdout.Push(marker + "READY_PW__\n");
+                c.End(mode is "lostack" or "reject" ? 1 : 0);
             }
-            else
-            {
-                Check(value == Root + "\n", "confirmation missing");
-                if (mode == "pamfailurezero") c.Stderr.Push("passwd: Authentication token manipulation error\n");
-                c.End(0);
-            }
+            else throw new Exception("Secret sent more than once to pw");
         };
         if (stage == 1) Ready();
         else { c.Stderr.Push(marker[..15]); c.Stderr.Push(marker[15..] + "SUDO_mobile__"); }
@@ -65,18 +62,22 @@ static class Tests
     }
     public static async Task Run()
     {
-        await Test("validation allows existing six-character and literal shell characters", () => { RootPasswordService.ValidatePasswords("alpine", "alpine"); RootPasswordService.ValidatePasswords(Mobile, Root); return Task.CompletedTask; });
+        await Test("validation allows six-character, literal shell and exact 128-byte passwords", () => { RootPasswordService.ValidatePasswords("alpine", "alpine"); RootPasswordService.ValidatePasswords(Mobile, Root); RootPasswordService.ValidatePasswords(Mobile, new string('Ж', 64)); return Task.CompletedTask; });
         await Test("validation rejects empty control and oversized UTF8 inputs", () => { Throws(() => RootPasswordService.ValidatePasswords("", Root)); Throws(() => RootPasswordService.ValidatePasswords(Mobile, "")); Throws(() => RootPasswordService.ValidatePasswords("bad\nline", Root)); Throws(() => RootPasswordService.ValidatePasswords(Mobile, "bad\0line")); Throws(() => RootPasswordService.ValidatePasswords(Mobile, new string('Ж', 65))); return Task.CompletedTask; });
-        await Test("sudo stdin plus passwd stdin and independent root UID0 verification", async () => { var f = new ServiceFixture(); var r = await Run(f); Check(r.Verified && r.PasswordChanged && !r.MayHaveChanged, "success flags"); Check(f.Users.SequenceEqual(new[] { "mobile", "root" }), "fresh root login absent"); Check(f.Channel!.Writes.SequenceEqual(new[] { Mobile + "\n", Root + "\n", Root + "\n" }), "stdin conversation"); Check(f.Stages.Any(p => !p.CanCancel), "mutation phase not guarded"); Check(f.MobileDisposed, "mobile connection leaked"); Check(!r.Message.Contains(Root) && !r.Message.Contains(Mobile), "secret in message"); });
-        await Test("sudo NOPASSWD never sends mobile into passwd", async () => { var f = new ServiceFixture("nopasswd"); var r = await Run(f); Check(r.Verified && f.Channel!.Writes.Count == 2, "NOPASSWD routing"); });
-        await Test("stderr prompt delivered before stdout READY is retained", async () => { var f = new ServiceFixture("reversed"); var r = await Run(f); Check(r.Verified, "cross-stream ordering failed"); });
+        await Test("password setup uses bootstrap pw without old-root PAM authentication", () => { var command = RootPasswordService.BuildCommand(Marker); Check(command.Contains("usermod root -h 0") && !command.Contains("/passwd"), "old-root-dependent passwd flow retained"); Check(command.Contains("-u root") && command.Contains("id -ru"), "full root identity not requested and checked"); Check(command.Contains("if [ -d /var/jb ]; then P=/var/jb/usr/sbin/pw; else P=/usr/sbin/pw; fi"), "rootless helper missing may fall back to wrong database"); Check(command.Contains("IFS= read -r NEW_ROOT || exit 74") && command.Contains("unset NEW_ROOT"), "input line not buffered and cleared"); Check(!command.Contains(Mobile) && !command.Contains(Root), "secret in command"); Throws(() => RootPasswordService.BuildCommand("bad;'marker")); return Task.CompletedTask; });
+        await Test("sudo stdin plus one pw input line and independent root UID0 verification", async () => { var f = new ServiceFixture(); var r = await Run(f); Check(r.Verified && r.PasswordChanged && !r.MayHaveChanged, "success flags"); Check(f.Users.SequenceEqual(new[] { "mobile", "root" }), "fresh root login absent"); Check(f.Channel!.Writes.SequenceEqual(new[] { Mobile + "\n", Root + "\n" }), "stdin conversation"); Check(f.Stages.Any(p => !p.CanCancel), "mutation phase not guarded"); Check(f.MobileDisposed, "mobile connection leaked"); Check(!r.Message.Contains(Root) && !r.Message.Contains(Mobile), "secret in message"); });
+        await Test("sudo NOPASSWD never sends mobile into pw", async () => { var f = new ServiceFixture("nopasswd"); var r = await Run(f); Check(r.Verified && f.Channel!.Writes.SequenceEqual(new[] { Root + "\n" }), "NOPASSWD routing"); });
+        await Test("stderr output before stdout readiness does not mix protocol streams", async () => { var f = new ServiceFixture("reversed"); var r = await Run(f); Check(r.Verified, "cross-stream ordering failed"); });
         await Test("wrong sudo password is not retried or reused as root", async () => { var f = new ServiceFixture("wrongmobile"); var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && f.Users.Count == 1 && f.Channel!.Writes.Count == 1, "sudo failure handling"); });
-        await Test("current root password prompt never receives mobile or new secret", async () => { var f = new ServiceFixture("old"); var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && r.Message.Contains("текущий пароль root") && f.Channel!.Writes.Count == 1, "old password handling"); });
+        await Test("legacy passwd prompt never receives mobile or new root secret", async () => { var f = new ServiceFixture("old"); var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && f.Channel!.Writes.Count == 1 && f.Users.Count == 1, "legacy password handling"); });
+        await Test("missing bootstrap pw fails before sending new password", async () => { var f = new ServiceFixture("missing"); var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && r.Message.Contains("не найдена утилита pw") && f.Channel!.Writes.Count == 1 && f.Users.Count == 1, "missing helper handling"); });
+        await Test("real or effective non-root identity fails before password input", async () => { var f = new ServiceFixture("notroot"); var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && r.Message.Contains("полный доступ root") && f.Channel!.Writes.Count == 1 && f.Users.Count == 1, "privilege handling"); });
         await Test("sudo requesting another user's password is refused", async () => { using var c = new FakeChannel(); c.Stderr.Push(Marker + "SUDO_root__"); bool mutation = false; await ProtocolFails(c, () => mutation = true); Check(!mutation && c.Writes.Count == 0 && c.Aborted, "wrong sudo account disclosure"); });
-        await Test("fresh root authentication rejection leaves explicit uncertainty", async () => { var f = new ServiceFixture() { RejectRoot = true }; var r = await Run(f); Check(!r.Verified && !r.PasswordChanged && r.MayHaveChanged, "failure uncertainty"); Check(f.Users.Count == 2 && f.Channel!.Writes.Count == 3, "mutation repeated"); });
-        await Test("Apple passwd exit zero on PAM failure is never claimed success", async () => { var f = new ServiceFixture("pamfailurezero") { RejectRoot = true }; var r = await Run(f); Check(!r.PasswordChanged && !r.Verified && r.MayHaveChanged, "exit zero trusted instead of root auth"); });
+        await Test("pw exit zero without fresh root authentication leaves explicit uncertainty", async () => { var f = new ServiceFixture() { RejectRoot = true }; var r = await Run(f); Check(!r.Verified && !r.PasswordChanged && r.MayHaveChanged, "failure uncertainty"); Check(f.Users.Count == 2 && f.Channel!.Writes.Count == 2, "mutation repeated"); });
         await Test("password rejection after first write does not retry change", async () => { var f = new ServiceFixture("reject") { RejectRoot = true }; var r = await Run(f); Check(r.MayHaveChanged && !r.Verified && f.Channel!.Writes.Count == 2 && f.Users.Count == 2, "rejection retried or ignored"); });
-        await Test("lost passwd acknowledgement can recover via independent root verification", async () => { var f = new ServiceFixture("lostack"); var r = await Run(f); Check(r.Verified && f.Channel!.Writes.Count == 2, "safe verification not attempted"); });
+        await Test("duplicate readiness never sends a second new password", async () => { var f = new ServiceFixture("duplicate") { RejectRoot = true }; var r = await Run(f); Check(r.MayHaveChanged && !r.Verified && f.Channel!.Writes.Count == 2 && f.Users.Count == 2, "duplicate mutation"); });
+        await Test("stdin failure after partial write attempts root verification without exposing input", async () => { var f = new ServiceFixture("writefailed") { RejectRoot = true }; var r = await Run(f); Check(r.MayHaveChanged && !r.Verified && f.Channel!.Writes.Count == 2 && f.Users.Count == 2, "partial write not verified"); Check(!r.Message.Contains(Mobile) && !r.Message.Contains(Root), "secret error leaked"); });
+        await Test("lost pw acknowledgement can recover via independent root verification", async () => { var f = new ServiceFixture("lostack"); var r = await Run(f); Check(r.Verified && f.Channel!.Writes.Count == 2, "safe verification not attempted"); });
         await Test("root login without UID0 is refused", async () => { var f = new ServiceFixture() { RootUid = "501" }; var r = await Run(f); Check(!r.Verified && r.MayHaveChanged, "non-root UID accepted"); });
         await Test("mobile identity is verified before password mutation", async () => { var f = new ServiceFixture() { MobileName = "other" }; var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && f.Channel == null && f.Users.Count == 1, "incorrect mobile identity"); });
         await Test("known host-key mismatch prevents all secret stdin writes", async () => { var f = new ServiceFixture() { InitialKeyMismatch = true }; var r = await Run(f); Check(!r.Verified && !r.MayHaveChanged && f.Channel == null, "initial key mismatch ignored"); Check(f.Settings.HostKeys.Values.Single() == f.Pin, "pin overwritten"); });
