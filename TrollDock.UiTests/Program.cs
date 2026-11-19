@@ -5,6 +5,7 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Threading;
 using TrollDock.Services;
+using TrollDock.Transport;
 
 namespace TrollDock.UiTests;
 
@@ -98,6 +99,7 @@ internal static class Program
             Check(Control<RadioButton>(main, "CertificateModeRadioButton").IsEnabled && Control<Button>(main, "HeaderSettingsButton").IsEnabled && Control<Border>(main, "CertificateCard").IsEnabled, "completed or failed operation restores editable controls");
             Invoke(main, "ClearQueue_Click", main, new RoutedEventArgs());
             Check(queueItems.Items.Count == 0 && !Control<Button>(main, "InstallButton").IsEnabled && Control<Border>(main, "QueueCard").Visibility == Visibility.Collapsed, "clear queue hides it and disables install");
+            TestRootPasswordDialog(main);
             main.Close();
             Console.WriteLine($"Passed {checks} WPF UI checks.");
             return 0;
@@ -111,7 +113,80 @@ internal static class Program
         }
     }
     private static void Check(bool condition, string message) { if (!condition) throw new Exception(message); checks++; Console.WriteLine("PASS " + message); }
-    private static T Control<T>(MainWindow window, string name) where T : class => window.FindName(name) as T ?? throw new Exception("Missing " + name);
+    private static T Control<T>(Window window, string name) where T : class => window.FindName(name) as T ?? throw new Exception("Missing " + name);
+    private static void TestRootPasswordDialog(MainWindow main)
+    {
+        Check(Control<Button>(main, "SetupRootPasswordButton").IsEnabled, "root setup is available without an existing SSH session");
+        Invoke(main, "SetBusy", true);
+        Check(!Control<Button>(main, "SetupRootPasswordButton").IsEnabled, "root setup is locked during installation");
+        Invoke(main, "SetBusy", false);
+        var options = new ConnectionOptions(new UsbDevice(1, "test-device", "Test iPhone"), true, "127.0.0.1", 22, "root", "should-not-reuse");
+        var calls = 0; var progressLocked = false; var closeBlocked = false;
+        RootPasswordWindow? window = null;
+        window = new RootPasswordWindow(new AppSettings(), options, false, (received, password, progress, token) =>
+        {
+            calls++;
+            Check(received.Username == "mobile" && received.Password == "mobile-fixture" && password == "root-fixture-123", "setup receives only explicitly entered mobile and new root credentials");
+            progress.Report(new RootPasswordProgress("Изменение", "Synthetic only", false));
+            progressLocked = !Control<Button>(window!, "CancelRootPasswordButton").IsEnabled;
+            window!.Closing += (_, e) => closeBlocked = e.Cancel;
+            window.Close();
+            Check(!token.IsCancellationRequested, "window close does not cancel an active password change");
+            return Task.FromResult(new RootPasswordResult(true, true, "Verified synthetic root"));
+        });
+        Check(calls == 0 && !Control<Button>(window, "ApplyRootPasswordButton").IsEnabled, "opening root setup performs no authentication or password mutation");
+        Control<PasswordBox>(window, "MobilePasswordBox").Password = "mobile-fixture";
+        Control<PasswordBox>(window, "NewRootPasswordBox").Password = "root-fixture-123";
+        Control<PasswordBox>(window, "ConfirmRootPasswordBox").Password = "different";
+        Check(!Control<Button>(window, "ApplyRootPasswordButton").IsEnabled, "mismatched root confirmation cannot start setup");
+        Control<PasswordBox>(window, "ConfirmRootPasswordBox").Password = "root-fixture-123";
+        Check(Control<Button>(window, "ApplyRootPasswordButton").IsEnabled, "matching valid passwords enable explicit setup action");
+        Control<PasswordBox>(window, "NewRootPasswordBox").Password = Control<PasswordBox>(window, "ConfirmRootPasswordBox").Password = "alpine";
+        Check(Control<Button>(window, "ApplyRootPasswordButton").IsEnabled, "existing jailbreak password conventions are not blocked by an arbitrary minimum length");
+        Control<PasswordBox>(window, "MobilePasswordBox").Password = new string('я', 600);
+        Check(!Control<Button>(window, "ApplyRootPasswordButton").IsEnabled, "UI uses backend UTF-8 byte limits for mobile passwords");
+        Control<PasswordBox>(window, "MobilePasswordBox").Password = "mobile-fixture";
+        Control<PasswordBox>(window, "NewRootPasswordBox").Password = Control<PasswordBox>(window, "ConfirmRootPasswordBox").Password = "root-fixture-123";
+        InvokeTask(window, "ApplyAsync").GetAwaiter().GetResult();
+        Check(calls == 1 && progressLocked && closeBlocked, "mutation blocks cancel and window closing until verification returns");
+        Check(new[] { "MobilePasswordBox", "NewRootPasswordBox", "ConfirmRootPasswordBox" }.All(name => Control<PasswordBox>(window, name).Password.Length == 0), "all password controls clear after the attempt");
+        Check(window.TakeVerifiedPassword() == "root-fixture-123" && window.TakeVerifiedPassword() == "", "verified password is transferred only once");
+        window.Close();
+
+        var uncertain = new RootPasswordWindow(new AppSettings(), options, false, (_, _, _, _) => Task.FromResult(new RootPasswordResult(false, true, "Changed but verification failed", true)));
+        Control<PasswordBox>(uncertain, "MobilePasswordBox").Password = "mobile-fixture";
+        Control<PasswordBox>(uncertain, "NewRootPasswordBox").Password = Control<PasswordBox>(uncertain, "ConfirmRootPasswordBox").Password = "root-fixture-123";
+        InvokeTask(uncertain, "ApplyAsync").GetAwaiter().GetResult();
+        Check(uncertain.TakeVerifiedPassword() == "" && !Control<Button>(uncertain, "ApplyRootPasswordButton").IsEnabled
+            && Control<TextBlock>(uncertain, "RootPasswordStatusText").Text == "Changed but verification failed", "unverified change is not stored or silently repeated");
+        uncertain.Close();
+
+        RootPasswordWindow? canceled = null;
+        canceled = new RootPasswordWindow(new AppSettings(), options, false, (_, _, _, token) =>
+        {
+            Invoke(canceled!, "RequestCancel", false);
+            return Task.FromCanceled<RootPasswordResult>(token);
+        });
+        Control<PasswordBox>(canceled, "MobilePasswordBox").Password = "mobile-fixture";
+        Control<PasswordBox>(canceled, "NewRootPasswordBox").Password = Control<PasswordBox>(canceled, "ConfirmRootPasswordBox").Password = "root-fixture-123";
+        InvokeTask(canceled, "ApplyAsync").GetAwaiter().GetResult();
+        Check(canceled.TakeVerifiedPassword() == "" && Control<TextBlock>(canceled, "RootPasswordStatusText").Text.Contains("Изменение пароля не началось"), "cancel during preparation does not claim or transfer a changed password");
+        canceled.Close();
+
+        Invoke(main, "ApplyVerifiedRootPassword", "root-fixture-123", false, options.Device!);
+        Check(Control<TextBox>(main, "UsernameBox").Text == "root" && Control<PasswordBox>(main, "PasswordBox").Password == "root-fixture-123"
+            && !Control<CheckBox>(main, "RememberPasswordCheckBox").IsChecked!.Value, "verified root credentials populate current session without forced persistence");
+        Check(AppSettings.Load().EncryptedPassword == "" && !File.ReadAllText(AppSettings.SettingsPath).Contains("root-fixture-123"), "remember-off does not persist the new root password");
+        var temporarySettings = AppSettings.SettingsPath + ".tmp";
+        Directory.CreateDirectory(temporarySettings);
+        try
+        {
+            Invoke(main, "ApplyVerifiedRootPassword", "another-fixture-123", false, options.Device!);
+            Check(Control<TextBlock>(main, "StageText").Text == "Пароль root задан" && Control<TextBlock>(main, "DetailText").Text.Contains("Сохранить настройки на ПК не удалось"), "PC save failure still reports a verified phone password change accurately");
+        }
+        finally { Directory.Delete(temporarySettings); }
+    }
+    private static Task InvokeTask(object target, string method) => (Task)target.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(target, null)!;
     private static string[] TabNames(MainWindow window) => Control<StackPanel>(window, "ModeTabsPanel").Children.OfType<RadioButton>().Select(b => b.Name).ToArray();
     private static void Invoke(object target, string method, params object[] args) => target.GetType().GetMethod(method, BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(target, args);
     private static void SetField(object target, string name, object? value) => target.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(target, value);

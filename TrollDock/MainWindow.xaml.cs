@@ -152,7 +152,7 @@ public partial class MainWindow : Window
         busy = value;
         ChooseIpaButton.IsEnabled = RefreshButton.IsEnabled = ConnectButton.IsEnabled = DeviceComboBox.IsEnabled = !value;
         IpaModeRadioButton.IsEnabled = DebModeRadioButton.IsEnabled = CertificateModeRadioButton.IsEnabled = ConnectionSettingsExpander.IsEnabled = !value;
-        HeaderSettingsButton.IsEnabled = CertificateCard.IsEnabled = !value;
+        HeaderSettingsButton.IsEnabled = CertificateCard.IsEnabled = SetupRootPasswordButton.IsEnabled = !value;
         UpdateQueueView();
         CancelButton.IsEnabled = value && !stopRequested && (queueRunning || !installing);
         CancelButton.Content = queueRunning ? "Остановить" : "Отмена";
@@ -182,6 +182,53 @@ public partial class MainWindow : Window
         try { StageText.Text = "Проверка подключения"; DetailText.Text = "Подключаюсь и ищу TrollStore…"; await ConnectAsync(operation.Token); StageText.Text = "Связь проверена"; DetailText.Text = session!.TrollStorePath.Length > 0 ? "TrollStore найден. Можно устанавливать IPA и DEB." : "SSH работает. TrollStore не найден; доступна установка DEB."; }
         catch (Exception ex) { ShowError(ex); }
         finally { operation.Dispose(); operation = null; SetBusy(false); }
+    }
+    private async void SetupRootPassword_Click(object sender, RoutedEventArgs e)
+    {
+        if (busy) return;
+        SetBusy(true); CancelButton.IsEnabled = false;
+        try
+        {
+            var autoUsb = AutoUsbRadioButton.IsChecked == true;
+            var port = 22;
+            if (!autoUsb && (!int.TryParse(TunnelPortBox.Text, out port) || port is < 1 or > 65535))
+                throw new IOException("Укажите корректный порт SSH-туннеля.");
+            if (autoUsb && DeviceComboBox.SelectedItem is not UsbDevice) await RefreshDevicesAsync();
+            var device = DeviceComboBox.SelectedItem as UsbDevice;
+            if (autoUsb && device is null) throw new IOException("Выберите iPhone в списке USB-устройств, затем задайте пароль root.");
+            if (session is not null) { await session.DisposeAsync(); session = null; }
+            ConnectionStatusText.Text = autoUsb ? "iPhone выбран · USB" : "Локальный SSH-туннель";
+            ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(154, 167, 186));
+            var options = new ConnectionOptions(device, autoUsb, TunnelHostBox.Text.Trim(), port, "mobile", "");
+            var dialog = new RootPasswordWindow(settings, options, RememberPasswordCheckBox.IsChecked == true) { Owner = this, Resources = Resources };
+            if (dialog.ShowDialog() == true)
+                ApplyVerifiedRootPassword(dialog.TakeVerifiedPassword(), dialog.RememberPassword, autoUsb ? device : null);
+        }
+        catch (Exception ex) { ShowError(ex); }
+        finally { SetBusy(false); }
+    }
+    private void ApplyVerifiedRootPassword(string password, bool remember, UsbDevice? device)
+    {
+        UsernameBox.Text = "root"; PasswordBox.Password = password; RememberPasswordCheckBox.IsChecked = remember;
+        StageText.Text = "Пароль root задан";
+        ConnectionStatusText.Text = "Вход root проверен";
+        ConnectionDot.Fill = new SolidColorBrush(Color.FromRgb(41, 174, 117));
+        var oldUsername = settings.Username; var oldPassword = settings.EncryptedPassword; var oldSerial = settings.LastSerial;
+        try
+        {
+            settings.Username = "root";
+            if (device is not null) settings.LastSerial = device.SerialNumber;
+            settings.SetPassword(password, remember); settings.Save();
+            DetailText.Text = remember ? "Вход под root подтверждён. Новый пароль сохранён с шифрованием Windows; можно устанавливать IPA и DEB."
+                : "Вход под root подтверждён. Новый пароль подставлен для текущего сеанса и не сохранён на ПК.";
+        }
+        catch
+        {
+            settings.Username = oldUsername; settings.EncryptedPassword = oldPassword; settings.LastSerial = oldSerial;
+            RememberPasswordCheckBox.IsChecked = false;
+            DetailText.Text = "Пароль на iPhone задан, вход root проверен. Сохранить настройки на ПК не удалось; новый пароль доступен в текущем окне. Сохраните его у себя.";
+        }
+        AddLog(DetailText.Text);
     }
     private async void Install_Click(object sender, RoutedEventArgs e)
     {
@@ -293,7 +340,7 @@ public partial class MainWindow : Window
     }
     private void ShowError(Exception ex)
     {
-        var message = ex is SshAuthenticationException ? "Не подошли имя пользователя или пароль SSH. Исправьте их в настройках подключения." : ex.Message;
+        var message = ex is SshAuthenticationException ? "Не подошли имя пользователя или пароль SSH. Если пароль root ещё не задан, откройте «Задать пароль root» в настройках SSH." : ex.Message;
         if (ex is SshAuthenticationException) ConnectionSettingsExpander.IsExpanded = true;
         StageText.Text = "Не удалось завершить"; DetailText.Text = message; AddLog(message); LogExpander.IsExpanded = true;
         InstallProgressBar.IsIndeterminate = false;
@@ -322,6 +369,11 @@ public partial class MainWindow : Window
         UpdateLayout();
         Window rendered = this;
         if (Environment.GetCommandLineArgs().Contains("--settings")) { rendered = new SettingsWindow(settings) { Owner = this, Resources = Resources }; rendered.Show(); rendered.UpdateLayout(); }
+        if (Environment.GetCommandLineArgs().Contains("--root-password"))
+        {
+            rendered = new RootPasswordWindow(settings, new ConnectionOptions(new UsbDevice(1, "preview", "iPhone · USB"), true, "127.0.0.1", 22, "mobile", ""), false) { Owner = this, Resources = Resources };
+            rendered.Show(); rendered.UpdateLayout();
+        }
         var visual = rendered.Content as FrameworkElement ?? rendered;
         var image = new RenderTargetBitmap((int)visual.ActualWidth, (int)visual.ActualHeight, 96, 96, PixelFormats.Pbgra32); image.Render(visual);
         var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));

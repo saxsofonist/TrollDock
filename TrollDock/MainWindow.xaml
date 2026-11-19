@@ -456,6 +456,13 @@
                                     </StackPanel>
                                 </Grid>
                                 <CheckBox x:Name="RememberPasswordCheckBox" Content="Запомнить пароль на этом компьютере" IsChecked="False" Margin="0,12,0,0" />
+                                <Border Background="#F1F6FF" CornerRadius="8" Padding="12" Margin="0,14,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Если пароль root ещё не задан" FontWeight="SemiBold" Foreground="#415671" />
+                                        <TextBlock Text="Войдите через mobile с его паролем и задайте пароль root. Подключение под root заранее не требуется." TextWrapping="Wrap" FontSize="11" Foreground="#67768D" Margin="0,5,0,10" />
+                                        <Button x:Name="SetupRootPasswordButton" Content="Задать пароль root" Click="SetupRootPassword_Click" HorizontalAlignment="Left" Padding="13,8" AutomationProperties.Name="Задать пароль root через mobile" />
+                                    </StackPanel>
+                                </Border>
                                 <Border BorderBrush="#E8EDF4" BorderThickness="0,1,0,0" Margin="0,16,0,0" Padding="0,14,0,0">
                                     <StackPanel>
                                         <RadioButton x:Name="AutoUsbRadioButton" GroupName="ConnectionMode" IsChecked="True" Content="USB: открыть туннель автоматически" />
